@@ -1,0 +1,13 @@
+FROM owasp/modsecurity-crs:nginx-alpine
+
+USER root
+
+# Ensure /tmp is writable
+RUN chmod 1777 /tmp
+
+# Copy nginx template
+COPY default.conf.template /etc/nginx/templates/conf.d/default.conf.template
+
+EXPOSE 8080
+
+USER nginx

@@ -1,0 +1,14 @@
+# Core ModSecurity configuration (override dirs already set outside)
+SecDataDir /tmp/modsecurity
+SecTmpDir /tmp/modsecurity
+SecRuleEngine On
+
+# --- CRS v4 setup (generated file) ---
+# setup.conf is expected to be present at /etc/nginx/modsecurity.d/setup.conf
+Include /etc/nginx/modsecurity.d/setup.conf
+
+# --- Load CRS ruleset (v4 layout) ---
+Include /etc/nginx/modsecurity.d/owasp-crs/rules/*.conf
+
+# --- Local overrides and custom rules (load AFTER CRS rules) ---
+Include /etc/nginx/modsecurity.d/modsecurity-override.conf

@@ -1,0 +1,43 @@
+# Logs
+logs/
+*.log
+
+# Output files
+output/
+
+# Backup files
+*.bak
+docker-compose.yml.bak
+
+# Environment variables
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+
+# Docker
+.docker/
+
+# Temporary files
+*.tmp
+*~
+
+# OWASP CRS (nếu folder này quá lớn, có thể ignore)
+# owasp-crs/

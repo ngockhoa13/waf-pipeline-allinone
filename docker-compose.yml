@@ -1,0 +1,118 @@
+services:
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    container_name: waf-zap
+    hostname: zap
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    command: >
+      zap.sh -daemon -host 0.0.0.0 -port 8080
+      -config api.disablekey=true
+      -config api.addrs.addr.name=.*
+      -config api.addrs.addr.regex=true
+      -config start.checkForUpdates=false
+    networks:
+      - waf-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/JSON/core/view/version/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  modsec:
+    build:
+      context: .
+      dockerfile: Dockerfile.modsec
+    container_name: waf-modsec
+    hostname: modsec
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # ============ PORT ============
+      - PORT=8080
+      
+      # ============ MODSECURITY MODE ============
+      - MODSEC_RULE_ENGINE=On
+      
+      # ============ AUDIT LOGGING ============
+      - MODSEC_AUDIT_ENGINE=On
+      - MODSEC_AUDIT_LOG_FORMAT=JSON
+      - MODSEC_AUDIT_LOG=/tmp/modsec_audit.log
+      - MODSEC_AUDIT_LOG_TYPE=Serial
+      - MODSEC_AUDIT_LOG_PARTS=ABCDEFHIJK
+      - MODSEC_AUDIT_RELEVANT_STATUS=.*
+      
+      # ============ CRS PARANOIA (QUAN TRỌNG) ============
+      - PARANOIA=2
+      - BLOCKING_PARANOIA=2
+      - EXECUTING_PARANOIA=2
+      
+      # ============ ANOMALY SCORING ============
+      - ANOMALY_INBOUND=5
+      - ANOMALY_OUTBOUND=4
+      
+      # ============ BODY HANDLING (CRITICAL FOR CRS) ============
+      - MODSEC_REQ_BODY_ACCESS=On
+      - MODSEC_REQ_BODY_LIMIT=13107200
+      - MODSEC_REQ_BODY_NOFILES_LIMIT=131072
+      - MODSEC_RESP_BODY_ACCESS=On
+      - MODSEC_RESP_BODY_LIMIT=524288
+      
+      # ============ DEBUG ============
+      - MODSEC_DEBUG_LOG=/tmp/modsec_debug.log
+      - MODSEC_DEBUG_LOGLEVEL=3
+      
+    volumes:
+      - ./output:/output
+      - modsec-logs:/tmp
+    networks:
+      - waf-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  automation:
+    build:
+      context: .
+      dockerfile: Dockerfile.automation
+    container_name: waf-automation
+    hostname: automation
+    restart: unless-stopped
+    environment:
+      - TARGET_DOMAIN=testaspnet.vulnweb.com
+      - TARGET_URL=http://testaspnet.vulnweb.com
+      - ZAP_HOST=zap
+      - ZAP_PORT=8080
+      - MODSEC_HOST=modsec
+      - MODSEC_PORT=8080
+      - PHASE1_CSV=/output/phase1_baseline.csv
+      - PHASE2_CSV=/output/phase2_waf_results.csv
+      - PHASE2_JSON=/output/phase2_waf_results.json
+    volumes:
+      - ./output:/output
+      - modsec-logs:/tmp:ro
+      - ./logs:/logs:ro
+    networks:
+      - waf-network
+    depends_on:
+      zap:
+        condition: service_healthy
+      modsec:
+        condition: service_healthy
+    command: /opt/run_pipeline.sh
+
+networks:
+  waf-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  modsec-logs:
