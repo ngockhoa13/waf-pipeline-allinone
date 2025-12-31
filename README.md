@@ -25,32 +25,131 @@ chmod +x setup_once.sh trigger_pipeline.sh
 
 ## 📋 Mục Lục
 
-1. [Tóm Tắt Tổng Quan](#1-tóm-tắt-tổng-quan)
-2. [Kiến Trúc Hệ Thống](#2-kiến-trúc-hệ-thống)
-3. [Tổng Quan Các Thành Phần](#3-tổng-quan-các-thành-phần)
-4. [Phase 1: Tạo Traffic Tấn Công](#4-phase-1-tạo-traffic-tấn-công)
-5. [Phase 2: Kiểm Thử WAF & Phân Loại](#5-phase-2-kiểm-thử-waf--phân-loại)
-6. [Hướng Dẫn Cài Đặt](#6-hướng-dẫn-cài-đặt)
-7. [Hướng Dẫn Sử Dụng](#7-hướng-dẫn-sử-dụng)
-8. [Thuật Toán Phân Loại](#8-thuật-toán-phân-loại)
-9. [Kết Quả & Phân Tích](#9-kết-quả--phân-tích)
-10. [Xử Lý Sự Cố](#10-xử-lý-sự-cố)
-11. [Cải Tiến Trong Tương Lai](#11-cải-tiến-trong-tương-lai)
+1. [Lịch Sử Phát Triển](#1-lịch-sử-phát-triển)
+2. [Tóm Tắt Tổng Quan](#2-tóm-tắt-tổng-quan)
+3. [Kiến Trúc Hệ Thống](#3-kiến-trúc-hệ-thống)
+4. [Tổng Quan Các Thành Phần](#4-tổng-quan-các-thành-phần)
+5. [Phase 1: Tạo Traffic Tấn Công](#5-phase-1-tạo-traffic-tấn-công)
+6. [Phase 2: Kiểm Thử WAF & Phân Loại](#6-phase-2-kiểm-thử-waf--phân-loại)
+7. [Hướng Dẫn Cài Đặt](#7-hướng-dẫn-cài-đặt)
+8. [Hướng Dẫn Sử Dụng](#8-hướng-dẫn-sử-dụng)
+9. [Thuật Toán Phân Loại](#9-thuật-toán-phân-loại)
+10. [Kết Quả & Phân Tích](#10-kết-quả--phân-tích)
+11. [Xử Lý Sự Cố](#11-xử-lý-sự-cố)
+12. [Cải Tiến Trong Tương Lai](#12-cải-tiến-trong-tương-lai)
 
 ---
 
-## 1. Tóm Tắt Tổng Quan
+## 1. Lịch Sử Phát Triển
 
-### 1.1 Giới Thiệu
+### Tuần 06/11/2024
+**Mục tiêu**: Tự động hóa quy trình cơ bản
+- ✅ Xây dựng Dockerfile cho các container
+- ✅ Tạo docker-compose.yaml để quản lý multi-container
+- ✅ Phát triển script xử lý phase1 (tạo traffic) và phase2 (phân loại)
+- ✅ Tìm hiểu Spider và AJAX Spider để crawl URL
+
+**Kết quả**: Pipeline cơ bản hoạt động với ZAP Spider
+
+---
+
+### Tuần 13/11/2024
+**Mục tiêu**: Containerization và crawling optimization
+- ✅ Tạo Dockerfile riêng biệt cho ZAP, ModSecurity, và Automation
+- ✅ Deploy hệ thống multi-container
+- ✅ Tích hợp Spider để crawl URLs từ domain
+- ✅ Sử dụng AJAX Spider để scan từng URL đã discover
+
+**Kết quả**: Hệ thống 3-container hoạt động độc lập
+
+---
+
+### Tuần 20/11/2024
+**Mục tiêu**: Tối ưu crawling và kiểm tra giới hạn
+- ✅ Sử dụng AJAX Spider trực tiếp (không cần Spider trước)
+- ✅ Kiểm tra limit request trên ZAP (max limit/time)
+- ✅ Tách biệt ZAP, ModSecurity, và Automation container
+- ✅ Tối ưu memory management
+
+**Kết quả**: Crawling nhanh hơn, giảm overhead
+
+---
+
+### Tuần 26/11/2024
+**Mục tiêu**: Memory management và Phase 2 integration
+- ✅ Thử nghiệm export CSV sau mỗi tool, clear memory ZAP
+- ✅ Tối ưu quy trình để tránh memory leak
+- ✅ Hoàn thiện Phase 2 (replay đến ModSecurity)
+- ✅ Kiểm tra load CRS trong container ModSecurity
+
+**Kết quả**: Pipeline hoàn chỉnh 2 phase
+
+---
+
+### Tuần 03/12/2024
+**Mục tiêu**: POST request handling và payload injection
+- ✅ Xử lý URL replay đến ModSecurity
+- ✅ Kiểm tra gửi kèm payload với POST request
+- ✅ Đảm bảo request body được gửi đúng format
+
+**Kết quả**: POST replay hoạt động chính xác với body
+
+---
+
+### Tuần 10/12/2024
+**Mục tiêu**: Classification và documentation
+- ✅ Kiểm tra POST request replay để phân loại
+- ✅ Viết báo cáo toàn bộ pipeline
+- ✅ Tối ưu thuật toán phân loại dựa trên ModSecurity tags
+
+**Kết quả**: Hệ thống hoàn thiện với tài liệu đầy đủ
+
+---
+
+### Tuần 31/12/2024
+**Mục tiêu**: Cookie authentication và full URL support
+- ✅ Thêm optional cookie cho authenticated crawling
+  - Hỗ trợ crawl các trang sau khi đăng nhập
+  - Cấu hình ZAP Context, HTTPSessions, và Replacer API
+  - Cookie được inject vào mọi request
+- ✅ Sửa input command để nhận full URL với scheme
+  - Hỗ trợ `https://example.com` thay vì chỉ `example.com`
+  - Tự động normalize URL (thêm `http://` nếu thiếu)
+  - Domain extraction cho output directory naming
+
+**Cú pháp mới**:
+```bash
+# Crawl với cookie authentication
+./trigger_pipeline.sh https://example.com ./output "session=abc123; token=xyz"
+
+# Crawl anonymous (không cookie)
+./trigger_pipeline.sh https://example.com ./output
+```
+
+**Kết quả**: Hỗ trợ crawl authenticated pages, full URL input
+
+---
+
+## 2. Tóm Tắt Tổng Quan
+
+### 2.1 Giới Thiệu
 
 Dự án này triển khai một pipeline tự động để kiểm thử và đánh giá hiệu quả của Web Application Firewall (WAF) sử dụng OWASP ModSecurity Core Rule Set (CRS). Hệ thống bao gồm hai giai đoạn chính với **kiến trúc trigger-based hiện đại**:
 
 - **Phase 1**: Spider → AJAX Spider → Payload Generation → Benign Traffic (Pure Python)
 - **Phase 2**: Replay traffic qua WAF, phân tích kết quả phát hiện và phân loại tấn công
 
-### 1.2 Tính Năng Chính
+### 2.2 Tính Năng Chính
 
+<<<<<<< HEAD
 ✅ **Kiến Trúc Build Once, Run Many**: Build containers một lần, test nhiều domains không cần rebuild
+=======
+✅ **Tạo Tấn Công Tự Động**: Sử dụng ZAP Spider/AJAX Spider kết hợp payload generator
+
+✅ **Cookie Authentication**: Hỗ trợ crawl authenticated pages với cookie injection
+
+✅ **Full URL Support**: Nhận input dạng `https://example.com` (với scheme)
+>>>>>>> 70b651d (feat: Add cookie authentication and full URL support)
 
 ✅ **Spider Tự Động**: ZAP Spider + AJAX Spider khám phá toàn bộ website
 
@@ -68,19 +167,24 @@ Dự án này triển khai một pipeline tự động để kiểm thử và đ
 
 ✅ **Trigger-Based Execution**: Chạy pipeline cho bất kỳ domain nào chỉ với một lệnh
 
-### 1.3 Công Nghệ Sử Dụng
+### 2.3 Công Nghệ Sử Dụng
 
 - **WAF**: OWASP ModSecurity CRS v4.21.0
+<<<<<<< HEAD
 - **Scanner**: OWASP ZAP (Spider + AJAX Spider)
 - **Payload Generator**: Pure Python (không phụ thuộc external tools)
+=======
+- **Scanner**: OWASP ZAP (Zed Attack Proxy) v2.17.0
+>>>>>>> 70b651d (feat: Add cookie authentication and full URL support)
 - **Container**: Docker & Docker Compose
 - **Ngôn Ngữ**: Python 3, Bash
 - **Web Server**: Nginx với module ModSecurity
 
 ---
 
-## 2. Kiến Trúc Hệ Thống
+## 3. Kiến Trúc Hệ Thống
 
+<<<<<<< HEAD
 ### 2.1 Kiến Trúc Trigger-Based (v2.0)
 
 ```
@@ -129,6 +233,9 @@ Dự án này triển khai một pipeline tự động để kiểm thử và đ
 ```
 
 ### 2.2 Sơ Đồ Containers
+=======
+### 3.1 Sơ Đồ Kiến Trúc
+>>>>>>> 70b651d (feat: Add cookie authentication and full URL support)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -154,6 +261,7 @@ Dự án này triển khai một pipeline tự động để kiểm thử và đ
 └─────────────────────────────────────────────────────────────┘
 ```
 
+<<<<<<< HEAD
 ### 2.3 Luồng Dữ Liệu Phase 1
 
 ```
@@ -190,12 +298,31 @@ Dự án này triển khai một pipeline tự động để kiểm thử và đ
 6. Verify Payloads → Check if payload reached WAF (98%+ verified)
                                       ↓
 7. Output Dataset → phase2_waf_results.csv + JSON (ML-ready)
+=======
+### 3.2 Luồng Dữ Liệu
+
+```
+1. Input: Target URL + Optional Cookie
+                ↓
+2. ZAP Spider/AJAX Spider → Crawl URLs (với cookie nếu có)
+                ↓
+3. Payload Generator → Gửi Attack Traffic qua ZAP Proxy
+                ↓
+4. Capture Requests/Responses → phase1_baseline.csv
+                ↓
+5. Phase2: Replay → ModSecurity WAF → Log Analysis
+                ↓
+6. Extract Rules & Tags → Classify Attack Types
+                ↓
+7. Output: phase2_waf_results.csv + .json (ML-ready)
+>>>>>>> 70b651d (feat: Add cookie authentication and full URL support)
 ```
 
 ---
 
-## 3. Tổng Quan Các Thành Phần
+## 4. Tổng Quan Các Thành Phần
 
+<<<<<<< HEAD
 ### 3.1 OWASP ZAP (Discovery & Proxy)
 
 - **Image**: `ghcr.io/zaproxy/zaproxy:stable`
@@ -210,6 +337,19 @@ Dự án này triển khai một pipeline tự động để kiểm thử và đ
   - AJAX Spider (JavaScript execution)
   - API endpoint discovery
   - Parameter detection
+=======
+### 4.1 OWASP ZAP (Bộ Tạo Tấn Công)
+
+- **Image**: `ghcr.io/zaproxy/zaproxy:stable` (v2.17.0)
+- **Mục đích**: Crawling và capture traffic
+- **Tính năng**:
+  - Spider & AJAX Spider cho URL discovery
+  - Context authentication với cookie injection
+  - HTTPSessions API cho session management
+  - Replacer API cho header manipulation
+  - Traffic capture qua proxy
+  - Fuzzing tham số
+>>>>>>> 70b651d (feat: Add cookie authentication and full URL support)
 
 ### 3.2 ModSecurity WAF
 
@@ -857,11 +997,110 @@ docker logs -f waf-automation
 # Check ZAP
 docker logs waf-zap
 
+<<<<<<< HEAD
 # Check ModSec
 docker logs waf-modsec
 
 # View audit log
 docker exec waf-modsec tail -f /tmp/modsec_audit.log
+=======
+### 8.2 Chạy Pipeline Với Target Tùy Chọn
+
+```bash
+# Cú pháp:
+./trigger_pipeline.sh <target_url> [output_dir] [cookie]
+
+# Ví dụ 1: Chỉ định URL đầy đủ (khuyến nghị)
+./trigger_pipeline.sh https://example.com
+
+# Ví dụ 2: URL HTTP
+./trigger_pipeline.sh http://testaspnet.vulnweb.com
+
+# Ví dụ 3: Chỉ định domain (tự động thêm http://)
+./trigger_pipeline.sh example.com
+
+# Ví dụ 4: Với output directory tùy chọn
+./trigger_pipeline.sh https://example.com ./results/example
+
+# Ví dụ 5: Với cookie để crawl các trang cần đăng nhập
+./trigger_pipeline.sh https://example.com ./output "session=abc123; auth_token=xyz789"
+```
+
+### 8.3 Sử Dụng Cookie (Authenticated Crawling)
+
+Để crawl các trang web yêu cầu đăng nhập, bạn có thể cung cấp cookie:
+
+#### Lấy Cookie Từ Trình Duyệt
+
+1. Đăng nhập vào trang web mục tiêu trong trình duyệt
+2. Mở Developer Tools (F12) → Tab Application → Cookies
+3. Copy các cookie session cần thiết
+4. Truyền vào lệnh với format: `"key1=value1; key2=value2"`
+
+#### Ví Dụ Với Cookie
+
+```bash
+# Format cookie: "name1=value1; name2=value2; ..."
+./trigger_pipeline.sh https://myapp.com ./output "PHPSESSID=abc123; auth_token=xyz789"
+
+# Với ASP.NET session
+./trigger_pipeline.sh https://aspnetapp.com ./output "ASP.NET_SessionId=abc123; .ASPXAUTH=xyz789"
+
+# Với JWT token (nếu lưu trong cookie)
+./trigger_pipeline.sh https://api.example.com ./output "jwt=eyJhbGciOiJIUzI1NiIs..."
+```
+
+#### Lưu Ý Về Cookie
+
+- Cookie chỉ hỗ trợ cho Phase 1 (crawling và attack generation)
+- Đảm bảo cookie chưa hết hạn khi chạy pipeline
+- Một số ứng dụng có thể invalidate session khi phát hiện hoạt động bất thường
+
+### 8.4 Thực Thi Thủ Công
+
+#### Chỉ Chạy Phase 1
+
+```bash
+docker exec -it waf-automation python3 /opt/phase1_capture.py
+
+# Đầu ra: /output/phase1_baseline.csv
+```
+
+#### Chỉ Chạy Phase 2
+
+```bash
+docker exec -it waf-automation python3 /opt/phase2_replay.py \
+  -i /output/phase1_baseline.csv \
+  -o /output/phase2_waf_results.csv \
+  -j /output/phase2_waf_results.json \
+  --host modsec \
+  -p 8080 \
+  -w 6
+```
+
+### 8.5 Tùy Chọn Nâng Cao
+
+#### Giới Hạn Số Lượng Requests
+
+```bash
+# Test với 100 requests đầu tiên
+python3 phase2_replay.py -i input.csv -o output.csv -j output.json -n 100
+```
+
+#### Điều Chỉnh Worker Threads
+
+```bash
+# Nhiều workers = nhanh hơn nhưng tốn tài nguyên hơn
+python3 phase2_replay.py ... -w 12  # 12 workers đồng thời
+```
+
+#### Biến Môi Trường Có Sẵn
+
+```bash
+# Trong docker-compose.yml hoặc trigger_pipeline.sh
+TARGET_URL=https://example.com      # Full URL (bao gồm scheme)
+COOKIE="session=abc123; auth=xyz"   # Optional, cho authenticated crawling
+>>>>>>> 70b651d (feat: Add cookie authentication and full URL support)
 ```
 
 ---

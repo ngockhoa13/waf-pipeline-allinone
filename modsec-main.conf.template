@@ -1,0 +1,14 @@
+# Main ModSecurity configuration loader
+# This file is referenced by nginx: modsecurity_rules_file
+
+# Load base config with audit settings
+Include /etc/nginx/modsecurity.d/modsecurity-base.conf
+
+# Load CRS setup
+Include /etc/modsecurity.d/owasp-crs/crs-setup.conf
+
+# Load all CRS rules
+Include /etc/modsecurity.d/owasp-crs/rules/*.conf
+
+# Load our overrides LAST (highest priority)
+Include /etc/nginx/modsecurity.d/modsecurity-override.conf

@@ -2,12 +2,33 @@ FROM owasp/modsecurity-crs:nginx-alpine
 
 USER root
 
-# Ensure /tmp is writable
 RUN chmod 1777 /tmp
+
+# Remove problematic scripts
+RUN rm -f /docker-entrypoint.d/90-copy-modsecurity-config.sh && \
+    rm -f /docker-entrypoint.d/94-activate-plugins.sh
 
 # Copy nginx template
 COPY default.conf.template /etc/nginx/templates/conf.d/default.conf.template
 
+# Copy ModSecurity configs
+COPY modsec-main.conf /etc/modsecurity.d/modsec-main.conf
+COPY modsecurity.conf /etc/modsecurity.d/modsecurity.conf
+COPY modsecurity-override.conf /etc/modsecurity.d/modsecurity-override.conf
+
+# Create minimal setup.conf
+RUN echo '# CRS Setup' > /etc/modsecurity.d/setup.conf
+
+# Ensure proper permissions
+RUN chmod 644 /etc/modsecurity.d/*.conf
+
+# Copy custom entrypoint
+COPY entrypoint-custom.sh /entrypoint-custom.sh
+RUN chmod +x /entrypoint-custom.sh
+
 EXPOSE 8080
+
+ENTRYPOINT ["/entrypoint-custom.sh"]
+CMD ["nginx", "-g", "daemon off;"]
 
 USER nginx

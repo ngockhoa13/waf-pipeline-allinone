@@ -1,20 +1,7 @@
-# ===== CORE SETTINGS =====
-SecRuleEngine On
-SecRequestBodyAccess On
-SecResponseBodyAccess On
+# Override configuration - loaded AFTER CRS rules
+# Has highest priority
 
-# ===== BODY LIMITS =====
-SecRequestBodyLimit 13107200
-SecRequestBodyNoFilesLimit 131072
-SecRequestBodyLimitAction ProcessPartial
-SecResponseBodyLimit 524288
-
-# ===== TEMP DIRECTORIES (WRITABLE) =====
-SecTmpDir /tmp/
-SecDataDir /tmp/
-SecUploadDir /tmp/
-
-# ===== AUDIT LOGGING =====
+# Force audit logging for ALL responses
 SecAuditEngine On
 SecAuditLogRelevantStatus ".*"
 SecAuditLogParts ABIJDEFHZ
@@ -22,24 +9,14 @@ SecAuditLogType Serial
 SecAuditLog /tmp/modsec_audit.log
 SecAuditLogFormat JSON
 
-# ===== DEBUG =====
+# Force body access
+SecRequestBodyAccess On
+SecResponseBodyAccess On
+
+# Debug
 SecDebugLog /tmp/modsec_debug.log
 SecDebugLogLevel 3
 
-# ===== CRITICAL: FORCE BODY PROCESSING =====
+# Force body processing for POST
 SecRule REQUEST_METHOD "^POST$" \
-    "id:999001,\
-    phase:1,\
-    pass,\
-    nolog,\
-    ctl:requestBodyAccess=On"
-
-# ===== TEST RULE: DETECT SQL INJECTION IN BODY =====
-SecRule ARGS "(?i:(\"|'|\-\-|;|\/\*|\*\/|union|select|insert|update|delete|drop|create|alter|exec|script|<|>))" \
-    "id:999002,\
-    phase:2,\
-    deny,\
-    status:403,\
-    log,\
-    msg:'SQL Injection Detected in Body',\
-    severity:CRITICAL"
+    "id:999001,phase:1,pass,nolog,ctl:requestBodyAccess=On"

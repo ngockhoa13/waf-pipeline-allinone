@@ -1,8 +1,10 @@
+# Base ModSecurity configuration
 SecRuleEngine On
 SecRequestBodyAccess On
 SecResponseBodyAccess On
 SecRequestBodyLimit 13107200
 SecRequestBodyNoFilesLimit 131072
+SecRequestBodyInMemoryLimit 131072
 SecRequestBodyLimitAction ProcessPartial
 SecResponseBodyLimit 524288
 SecResponseBodyMimeType text/plain text/html text/xml application/json application/x-www-form-urlencoded
@@ -22,4 +24,6 @@ SecDebugLogLevel 3
 SecArgumentSeparator &
 SecCookieFormat 0
 SecStatusEngine Off
+SecServerSignature "Apache"
+SecUnicodeMapFile /etc/modsecurity.d/unicode.mapping 20127
 SecCollectionTimeout 600

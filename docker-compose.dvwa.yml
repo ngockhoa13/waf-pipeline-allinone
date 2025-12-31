@@ -1,0 +1,56 @@
+# DVWA - Damn Vulnerable Web Application
+# Dùng để test WAF pipeline với cookie authentication
+#
+# Khởi động:
+#   docker-compose -f docker-compose.dvwa.yml up -d
+#
+# Truy cập: http://localhost:4280
+# Login: admin / password
+#
+# Sau khi login, chạy pipeline với:
+#   ./trigger_pipeline.sh http://dvwa:80 ./output/dvwa "PHPSESSID=xxx; security=low"
+#
+# Lưu ý: Dùng "dvwa:80" thay vì "localhost:4280" để containers có thể communicate
+
+services:
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    container_name: dvwa-test
+    hostname: dvwa
+    ports:
+      - "4280:80"
+    environment:
+      - MYSQL_HOSTNAME=dvwa-db
+      - MYSQL_DATABASE=dvwa
+      - MYSQL_USERNAME=dvwa
+      - MYSQL_PASSWORD=p@ssw0rd
+    depends_on:
+      - dvwa-db
+    networks:
+      - waf-pipeline-allinone_waf-network
+      - dvwa-network
+    restart: unless-stopped
+
+  dvwa-db:
+    image: mariadb:10.6
+    container_name: dvwa-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=dvwa
+      - MYSQL_DATABASE=dvwa
+      - MYSQL_USER=dvwa
+      - MYSQL_PASSWORD=p@ssw0rd
+    volumes:
+      - dvwa-data:/var/lib/mysql
+    networks:
+      - dvwa-network
+    restart: unless-stopped
+
+networks:
+  dvwa-network:
+    driver: bridge
+  # Kết nối vào network của WAF pipeline
+  waf-pipeline-allinone_waf-network:
+    external: true
+
+volumes:
+  dvwa-data:

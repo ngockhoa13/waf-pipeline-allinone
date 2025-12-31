@@ -1,12 +1,38 @@
 #!/bin/bash
 set -e
 
+# ============================================
+# CHECK IF PIPELINE ALREADY COMPLETED
+# ============================================
+COMPLETION_FLAG="/output/.pipeline_completed"
+if [ -f "$COMPLETION_FLAG" ]; then
+    echo ""
+    echo "════════════════════════════════════════════════════"
+    echo " ✅ PIPELINE ALREADY COMPLETED"
+    echo "════════════════════════════════════════════════════"
+    echo " Completed at: $(cat $COMPLETION_FLAG)"
+    echo ""
+    echo " 🔄 To rerun the pipeline:"
+    echo "    rm -f output/.pipeline_completed"
+    echo "    docker-compose up automation"
+    echo "════════════════════════════════════════════════════"
+    echo ""
+    exit 0
+fi
+
 echo "════════════════════════════════════════════════════"
 echo " 🤖 AUTOMATION CONTROLLER"
 echo "════════════════════════════════════════════════════"
-echo " Target: $TARGET_DOMAIN"
+echo " Target URL: $TARGET_URL"
+echo " Target Domain: $TARGET_DOMAIN"
 echo " ZAP: $ZAP_HOST:$ZAP_PORT"
 echo " WAF: $MODSEC_HOST:$MODSEC_PORT"
+if [ -n "$COOKIE" ]; then
+    COOKIE_PREVIEW=$(echo "$COOKIE" | cut -c1-30)
+    echo " Cookie: ${COOKIE_PREVIEW}... (authenticated)"
+else
+    echo " Cookie: None (anonymous)"
+fi
 echo "════════════════════════════════════════════════════"
 
 # Wait for services
@@ -37,7 +63,11 @@ echo "════════════════════════�
 echo " 📡 PHASE 1: ZAP Attack Generation"
 echo "════════════════════════════════════════════════════"
 
-export TARGET_URL="http://${TARGET_DOMAIN}"
+# TARGET_URL đã được set từ trigger_pipeline.sh hoặc docker-compose
+# Nếu chưa có, tạo từ TARGET_DOMAIN (fallback compatibility)
+if [ -z "$TARGET_URL" ]; then
+    export TARGET_URL="http://${TARGET_DOMAIN}"
+fi
 export PHASE1_CSV="/output/phase1_baseline.csv"
 
 python3 /opt/phase1_capture.py
@@ -53,7 +83,7 @@ echo "✅ Phase 1 complete: $PHASE1_LINES lines generated"
 # Phase 2: WAF Testing
 echo ""
 echo "════════════════════════════════════════════════════"
-echo " 🛡️  PHASE 2: WAF Classification"
+echo " 🛡  PHASE 2: WAF Classification"
 echo "════════════════════════════════════════════════════"
 
 export PHASE2_CSV="/output/phase2_waf_results.csv"
@@ -63,7 +93,7 @@ export MODSEC_LOG="/tmp/modsec_audit.log"
 if [ -f "$MODSEC_LOG" ]; then
     echo "✅ Audit log found: $MODSEC_LOG"
 else
-    echo "⚠️  WARNING: Audit log not found at $MODSEC_LOG"
+    echo "⚠  WARNING: Audit log not found at $MODSEC_LOG"
 fi
 
 python3 /opt/phase2_replay.py \
@@ -80,7 +110,7 @@ if [ ! -f "$PHASE2_CSV" ]; then
     exit 1
 fi
 
-# Summary - FIX: Use column 13 (label) instead of column 8
+# Summary
 TOTAL=$(tail -n +2 "$PHASE2_CSV" | wc -l | tr -d ' ')
 ATTACK=$(tail -n +2 "$PHASE2_CSV" | cut -d',' -f13 | grep -c "attack" 2>/dev/null || echo 0)
 BENIGN=$(tail -n +2 "$PHASE2_CSV" | cut -d',' -f13 | grep -c "benign" 2>/dev/null || echo 0)
@@ -105,3 +135,12 @@ echo "   - Phase 1: $PHASE1_CSV"
 echo "   - Phase 2: $PHASE2_CSV"
 echo "   - Phase 2: $PHASE2_JSON"
 echo ""
+
+# ============================================
+# MARK PIPELINE AS COMPLETED
+# ============================================
+date '+%Y-%m-%d %H:%M:%S' > "$COMPLETION_FLAG"
+echo "✅ Pipeline marked as completed!"
+echo "🔒 Pipeline will not run again until you delete: $COMPLETION_FLAG"
+echo ""
+echo "════════════════════════════════════════════════════"

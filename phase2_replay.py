@@ -48,24 +48,39 @@ verification_stats = {
 }
 
 def verify_payload_in_log(log_entry: dict, original_body: str) -> dict:
-    """Verify payload in log"""
+    """Verify payload in log - FIXED LOGIC"""
     result = {"verified": False, "reason": "no_log"}
     
     if not log_entry:
         return result
     
     transaction = log_entry.get("transaction", {})
-    request_body = transaction.get("request", {}).get("body", "")
+    request = transaction.get("request", {})
     
-    if request_body and original_body:
-        if original_body in request_body:
-            result = {"verified": True, "reason": "body_match"}
-        else:
-            result = {"verified": False, "reason": "body_mismatch"}
-    elif original_body:
-        result = {"verified": False, "reason": "body_missing_in_log"}
-    else:
+    # Check if body key exists (not just empty string)
+    has_body_field = "body" in request
+    request_body = request.get("body", "")
+    
+    # If no original body expected, it's OK
+    if not original_body:
         result = {"verified": True, "reason": "no_body"}
+        return result
+    
+    # If original body exists but no body field in log
+    if not has_body_field:
+        result = {"verified": False, "reason": "body_missing_in_log"}
+        return result
+    
+    # If body field exists but is empty
+    if not request_body:
+        result = {"verified": False, "reason": "body_empty_in_log"}
+        return result
+    
+    # Compare bodies
+    if original_body in request_body:
+        result = {"verified": True, "reason": "body_match"}
+    else:
+        result = {"verified": False, "reason": "body_mismatch"}
     
     messages = log_entry.get("transaction", {}).get("messages", [])
     if not messages:

@@ -4,10 +4,28 @@ logs/
 
 # Output files
 output/
+results/
 
 # Backup files
 *.bak
+*.backup
+*.backup.*
 docker-compose.yml.bak
+
+# Temporary debug/fix scripts
+fix_*.sh
+test_*.sh
+debug_*.sh
+*_fix.sh
+analyze_*.py
+ultimate_*.sh
+
+# Mysterious temp files
+exporting
+naming
+transferring
+writing
+=
 
 # Environment variables
 .env

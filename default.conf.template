@@ -2,7 +2,6 @@ upstream backend {
     server 127.0.0.1:8081;
 }
 
-# Backend giả
 server {
     listen 8081;
     location / {
@@ -10,40 +9,28 @@ server {
     }
 }
 
-# WAF Frontend - OPTIMIZED FOR CRS RULES
 server {
     listen 8080;
     server_name ~^.*$;
-    
     access_log /tmp/nginx_access.log combined;
     error_log /tmp/nginx_error.log warn;
-    
-    # ===== CRITICAL: BODY BUFFERING SETTINGS =====
     client_max_body_size 50M;
     client_body_buffer_size 128k;
     client_body_in_single_buffer on;
     client_body_in_file_only off;
+    modsecurity on;
+    modsecurity_rules_file /etc/modsecurity.d/modsec-main.conf;
     
-    # ===== HEALTH CHECK (NO WAF) =====
     location /health {
         modsecurity off;
         access_log off;
         return 200 "OK\n";
     }
     
-    # ===== MAIN LOCATION - CRS ENABLED =====
     location / {
-        # Enable ModSecurity (rules loaded via /etc/nginx/conf.d/modsecurity.conf from image)
-        modsecurity on;
-        
-        # Proxy settings
         proxy_pass http://backend;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # CRITICAL: Disable buffering so ModSecurity processes body directly
         proxy_buffering off;
         proxy_request_buffering off;
     }
